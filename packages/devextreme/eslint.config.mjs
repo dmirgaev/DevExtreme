@@ -14,6 +14,11 @@ import simpleImportSort from 'eslint-plugin-simple-import-sort';
 import { changeRulesToStylistic } from 'eslint-migration-utils';
 import unicorn from 'eslint-plugin-unicorn';
 import customRules from './eslint_plugins/index.js';
+import {
+    qunit as qunitConfig,
+    typescript as typescriptConfig,
+    spellCheck as spellCheckConfig,
+} from 'eslint-config-devextreme';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +48,7 @@ export default [
             'js/common/core/localization/default_messages.js',
         ],
     },
-    ...compat.extends('devextreme/spell-check'),
+    ...spellCheckConfig,
     {
         plugins: {
             'no-only-tests': noOnlyTests,
@@ -174,7 +179,7 @@ export default [
             'import': importPlugin,
         }
     },
-    ...compat.extends('devextreme/typescript').map(config => {
+    ...typescriptConfig.map(config => {
         const newConfig = {
             ...config,
             files: ['**/*.ts?(x)'],
@@ -218,10 +223,11 @@ export default [
             '@typescript-eslint/switch-exhaustiveness-check': ['error', {
                 considerDefaultExhaustiveForUnions: true,
             }],
+            '@typescript-eslint/prefer-nullish-coalescing': 'off',
             'devextreme-custom/no-direct-preact-signals-core-import': 'error',
         },
     },
-    ...compat.extends('devextreme/typescript').map(config => {
+    ...typescriptConfig.map(config => {
         const newConfig = {
             ...config,
             files: ['**/*.d.ts'],
@@ -255,13 +261,14 @@ export default [
             '@typescript-eslint/no-unsafe-function-type': 'off',
             '@typescript-eslint/no-wrapper-object-types': 'off',
             '@typescript-eslint/no-empty-object-type': 'off',
+            'require-await': 'off',
             'i18n/no-russian-character': ['error', {
                 includeIdentifier: true,
             }],
         }
     },
     //  Rules for QUnit tests
-    ...compat.extends('devextreme/qunit').map(config => ({
+    ...qunitConfig.map(config => ({
         ...config,
         files: ['testing/tests/**/*.js', 'testing/helpers/**/*.js'],
     })),
@@ -369,7 +376,7 @@ export default [
             '@typescript-eslint/no-empty-interface': 'off',
         },
     },
-    // Rules for build folder
+    // Rules for the build folder
     ...compat.extends('plugin:node/recommended').map(config => ({
         ...config,
         files: ['build/**/*'],
