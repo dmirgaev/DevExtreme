@@ -14,11 +14,16 @@ import simpleImportSort from 'eslint-plugin-simple-import-sort';
 import { changeRulesToStylistic } from 'eslint-migration-utils';
 import unicorn from 'eslint-plugin-unicorn';
 import customRules from './eslint_plugins/index.js';
+import qunitConfig from 'eslint-config-devextreme/qunit';
+import typescriptConfig from 'eslint-config-devextreme/typescript';
+import spellCheckConfig from 'eslint-config-devextreme/spellCheck';
+/* Also can be imported as:
 import {
     qunit as qunitConfig,
     typescript as typescriptConfig,
     spellCheck as spellCheckConfig,
 } from 'eslint-config-devextreme';
+ */
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
