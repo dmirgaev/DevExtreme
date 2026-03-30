@@ -17,19 +17,102 @@
     </script>
 
     <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        /* ── Log panel ── */
         #log {
-            margin-top: 20px;
+            margin-top: 12px;
             padding: 12px;
             background: #f5f5f5;
             border: 1px solid #ddd;
             font-family: "Consolas", "Courier New", monospace;
             font-size: 13px;
-            max-height: 500px;
+            max-height: 150px;
             overflow-y: auto;
+        }
+        #log:empty::before {
+            content: "Click any action button above to see results here…";
+            color: #999;
+            font-style: italic;
         }
         #log .log-section { margin: 8px 0 4px; font-weight: bold; color: #333; }
         #log .log-success  { color: #2e7d32; }
         #log .log-failure  { color: #c62828; }
+        #log .log-args     { color: #555; font-size: 12px; margin-left: 18px; }
+
+        /* ── Action panel ── */
+        #actions-panel {
+            margin-top: 16px;
+        }
+        .action-section {
+            margin-bottom: 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+        }
+        .action-section-header {
+            background: #f0f0f0;
+            padding: 8px 14px;
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+            border-bottom: 1px solid #e0e0e0;
+            border-radius: 6px 6px 0 0;
+        }
+        .action-section-body {
+            padding: 10px 14px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .action-btn-wrap {
+            position: relative;
+        }
+        .action-btn-wrap .tip {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-line;
+            z-index: 10000;
+            min-width: 260px;
+            max-width: 400px;
+            box-shadow: 0 2px 8px rgba(0,0,0,.25);
+            pointer-events: none;
+        }
+        .action-btn-wrap .tip::after {
+            content: "";
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            margin-left: -5px;
+            border: 5px solid transparent;
+            border-bottom-color: #333;
+        }
+        .action-btn-wrap:hover .tip { display: block; }
+
+        /* ── Top panel (grid + toolbar + log, sticky) ── */
+        #top-panel {
+            position: sticky;
+            top: 0;
+            z-index: 60;
+            background: var(--dx-component-color-bg);
+            padding-bottom: 4px;
+        }
+
+        /* ── Toolbar row ── */
+        .toolbar-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 12px;
+        }
     </style>
 
     <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
@@ -43,15 +126,23 @@
         <select id="theme-selector" style="display: block;"></select>
         <br />
 
-        <!-- DataGrid container -->
-        <div id="gridContainer"></div>
+        <!-- Top panel: grid + toolbar + log (sticky) -->
+        <div id="top-panel">
+            <!-- DataGrid container -->
+            <div id="gridContainer"></div>
 
-        <!-- Run button -->
-        <br />
-        <div id="runButton"></div>
+            <!-- Toolbar: Run All + Clear Log -->
+            <div class="toolbar-row">
+                <div id="runAllButton"></div>
+                <div id="clearLogButton"></div>
+            </div>
 
-        <!-- Log output -->
-        <div id="log"></div>
+            <!-- Log output -->
+            <div id="log"></div>
+        </div>
+
+        <!-- Action buttons panel -->
+        <div id="actions-panel"></div>
     </div>
 
     <script>
@@ -66,25 +157,10 @@
     // ── Constants & helpers ──────────────────────
 
     const ACTION_NAMES = Object.freeze([
-        'sorting',
-        'clearSorting',
-        'filtering',
-        'filterValue',
-        'clearFilter',
-        'searching',
-        'grouping',
-        'pageIndex',
-        'pageSize',
-        'rowFocusing',
-        'selectByKeys',
-        'selectByIndexes',
-        'selectAll',
-        'deselectAll',
-        'clearSelection',
-        'columnsVisibility',
-        'columnsReorder',
-        'columnsPinning',
-        'columnsResize',
+        'sorting', 'clearSorting', 'filtering', 'filterValue', 'clearFilter',
+        'searching', 'grouping', 'pageIndex', 'pageSize', 'rowFocusing',
+        'selectByKeys', 'selectByIndexes', 'selectAll', 'deselectAll', 'clearSelection',
+        'columnsVisibility', 'columnsReorder', 'columnsPinning', 'columnsResize',
     ]);
 
     function _success() { return { status: 'success' }; }
@@ -97,7 +173,6 @@
     class DataGridToolingApi {
         constructor(grid) {
             this._grid = grid;
-
             this._handlers = {
                 sorting:           (p) => this._sorting(p),
                 clearSorting:      (p) => this._clearSorting(p),
@@ -134,24 +209,16 @@
             }
         }
 
-        // ── validation ──
-
         _colExists(df) { return this._grid.columnOption(df) !== undefined; }
-
         _validateCol(df) {
             if (!this._colExists(df)) return _failure('Column "' + df + '" does not exist.');
             return null;
         }
 
-        // ── Sorting ─────
-
         async _sorting(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
-
+            var err = this._validateCol(p.dataField); if (err) return err;
             var order = p.sortOrder === 'none' ? undefined : p.sortOrder;
             this._grid.columnOption(p.dataField, 'sortOrder', order);
-
             var actual = this._grid.columnOption(p.dataField, 'sortOrder');
             if (order === undefined && actual !== undefined)
                 return _failure('Sorting was not cleared for "' + p.dataField + '". Got: "' + actual + '".');
@@ -169,14 +236,9 @@
             return _success();
         }
 
-        // ── Filtering (per-column) ──
-
         async _filtering(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
-
+            var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, 'filterValue', p.filterValue);
-
             var actual = this._grid.columnOption(p.dataField, 'filterValue');
             if (p.filterValue === null && actual !== undefined && actual !== null)
                 return _failure('Filter not cleared for "' + p.dataField + '". Got: "' + actual + '".');
@@ -185,11 +247,8 @@
             return _success();
         }
 
-        // ── FilterValue (combined / builder) ──
-
         async _filterValue(p) {
             this._grid.option('filterValue', p.expression);
-
             var actual = this._grid.option('filterValue');
             if (p.expression === null) {
                 if (actual !== null && actual !== undefined)
@@ -201,8 +260,6 @@
             return _success();
         }
 
-        // ── Clear filter ──
-
         async _clearFilter() {
             this._grid.clearFilter();
             var combined = this._grid.getCombinedFilter();
@@ -210,8 +267,6 @@
                 return _failure('clearFilter failed. Combined: ' + JSON.stringify(combined));
             return _success();
         }
-
-        // ── Searching ──
 
         async _searching(p) {
             this._grid.searchByText(p.text);
@@ -221,14 +276,9 @@
             return _success();
         }
 
-        // ── Grouping ──
-
         async _grouping(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
-
+            var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, 'groupIndex', p.groupIndex);
-
             var actual = this._grid.columnOption(p.dataField, 'groupIndex');
             if (p.groupIndex === undefined && actual !== undefined && actual !== -1)
                 return _failure('Grouping not cleared for "' + p.dataField + '". Got: ' + actual);
@@ -237,8 +287,6 @@
             return _success();
         }
 
-        // ── Paging ──
-
         async _pageIndex(p) {
             var idx = p.pageIndex;
             if (!Number.isInteger(idx) || idx < 0)
@@ -246,12 +294,9 @@
             var count = this._grid.pageCount();
             if (count > 0 && idx >= count)
                 return _failure('pageIndex ' + idx + ' out of range. pageCount: ' + count);
-
             await _toPromise(this._grid.pageIndex(idx));
-
             var actual = this._grid.pageIndex();
-            if (actual !== idx)
-                return _failure('Expected pageIndex ' + idx + ', got ' + actual);
+            if (actual !== idx) return _failure('Expected pageIndex ' + idx + ', got ' + actual);
             return _success();
         }
 
@@ -259,31 +304,22 @@
             var size = p.pageSize;
             if (!Number.isInteger(size) || size <= 0)
                 return _failure('pageSize must be positive integer. Got: ' + size);
-
             this._grid.pageSize(size);
-
             var actual = this._grid.pageSize();
-            if (actual !== size)
-                return _failure('Expected pageSize ' + size + ', got ' + actual);
+            if (actual !== size) return _failure('Expected pageSize ' + size + ', got ' + actual);
             return _success();
         }
-
-        // ── Row focusing ──
 
         async _rowFocusing(p) {
             if (!this._grid.option('focusedRowEnabled'))
                 return _failure('focusedRowEnabled is not true. Enable it first.');
-
             this._grid.option('focusedRowKey', p.key);
             await _toPromise(this._grid.navigateToRow(p.key));
-
             var actual = this._grid.option('focusedRowKey');
             if (actual !== p.key)
                 return _failure('Expected focusedRowKey ' + JSON.stringify(p.key) + ', got ' + JSON.stringify(actual));
             return _success();
         }
-
-        // ── Selection ──
 
         async _selectByKeys(p) {
             await _toPromise(this._grid.selectRows(p.keys, p.preserve));
@@ -296,9 +332,7 @@
 
         async _selectByIndexes(p) {
             var bad = p.indexes.find(function(i) { return !Number.isInteger(i) || i < 0; });
-            if (bad !== undefined)
-                return _failure('Invalid index: ' + bad);
-
+            if (bad !== undefined) return _failure('Invalid index: ' + bad);
             await _toPromise(this._grid.selectRowsByIndexes(p.indexes));
             var selected = this._grid.getSelectedRowKeys();
             if (selected.length === 0 && p.indexes.length > 0)
@@ -310,33 +344,26 @@
             await _toPromise(this._grid.selectAll());
             var selected = this._grid.getSelectedRowKeys();
             var total = this._grid.totalCount();
-            if (total > 0 && selected.length === 0)
-                return _failure('selectAll resulted in empty selection.');
+            if (total > 0 && selected.length === 0) return _failure('selectAll resulted in empty selection.');
             return _success();
         }
 
         async _deselectAll() {
             await _toPromise(this._grid.deselectAll());
             var selected = this._grid.getSelectedRowKeys();
-            if (selected.length !== 0)
-                return _failure('deselectAll failed. Still selected: ' + selected.length);
+            if (selected.length !== 0) return _failure('deselectAll failed. Still selected: ' + selected.length);
             return _success();
         }
 
         async _clearSelection() {
             this._grid.clearSelection();
             var selected = this._grid.getSelectedRowKeys();
-            if (selected.length !== 0)
-                return _failure('clearSelection failed. Still selected: ' + selected.length);
+            if (selected.length !== 0) return _failure('clearSelection failed. Still selected: ' + selected.length);
             return _success();
         }
 
-        // ── Columns: visibility ──
-
         async _columnsVisibility(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
-
+            var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, 'visible', p.visible);
             var actual = this._grid.columnOption(p.dataField, 'visible');
             if (actual !== p.visible)
@@ -344,14 +371,10 @@
             return _success();
         }
 
-        // ── Columns: reorder ──
-
         async _columnsReorder(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
+            var err = this._validateCol(p.dataField); if (err) return err;
             if (!Number.isInteger(p.visibleIndex) || p.visibleIndex < 0)
                 return _failure('visibleIndex must be non-negative integer. Got: ' + p.visibleIndex);
-
             this._grid.columnOption(p.dataField, 'visibleIndex', p.visibleIndex);
             var actual = this._grid.columnOption(p.dataField, 'visibleIndex');
             if (actual !== p.visibleIndex)
@@ -359,21 +382,15 @@
             return _success();
         }
 
-        // ── Columns: pinning ──
-
         async _columnsPinning(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
-
+            var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, {
                 fixed: p.fixed,
                 fixedPosition: p.fixed ? (p.fixedPosition || 'left') : undefined
             });
-
             var actualFixed = this._grid.columnOption(p.dataField, 'fixed');
             if (actualFixed !== p.fixed)
                 return _failure('Expected fixed=' + p.fixed + ' for "' + p.dataField + '", got ' + actualFixed);
-
             if (p.fixed) {
                 var expectedPos = p.fixedPosition || 'left';
                 var actualPos = this._grid.columnOption(p.dataField, 'fixedPosition');
@@ -383,14 +400,10 @@
             return _success();
         }
 
-        // ── Columns: resize ──
-
         async _columnsResize(p) {
-            var err = this._validateCol(p.dataField);
-            if (err) return err;
+            var err = this._validateCol(p.dataField); if (err) return err;
             if (typeof p.width === 'number' && p.width <= 0)
                 return _failure('width must be positive. Got: ' + p.width);
-
             this._grid.columnOption(p.dataField, 'width', p.width);
             var actual = this._grid.columnOption(p.dataField, 'width');
             if (actual !== p.width)
@@ -401,21 +414,330 @@
 
     /**
      * ====================================================================
+     *  Action definitions — each entry becomes a button
+     * ====================================================================
+     */
+
+    var ACTION_DEFS = [
+        // ── 1. Sorting ──────────────────────────
+        { section: 'Sorting',
+          label: 'Sort LastName ASC',
+          action: 'sorting',
+          args: { dataField: 'LastName', sortOrder: 'asc' },
+          expect: 'success',
+          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "asc" }\nExpect: LastName column sorted ascending' },
+
+        { section: 'Sorting',
+          label: 'Sort LastName DESC',
+          action: 'sorting',
+          args: { dataField: 'LastName', sortOrder: 'desc' },
+          expect: 'success',
+          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "desc" }\nExpect: LastName column sorted descending' },
+
+        { section: 'Sorting',
+          label: 'Remove Sort from LastName',
+          action: 'sorting',
+          args: { dataField: 'LastName', sortOrder: 'none' },
+          expect: 'success',
+          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "none" }\nExpect: Sorting cleared on LastName column' },
+
+        { section: 'Sorting',
+          label: '⛔ Sort Non-Existent Column',
+          action: 'sorting',
+          args: { dataField: 'NoSuchField', sortOrder: 'asc' },
+          expect: 'failure',
+          tip: 'Action: sorting\nArgs: { dataField: "NoSuchField", sortOrder: "asc" }\nExpect: FAILURE — column does not exist' },
+
+        { section: 'Sorting',
+          label: 'Clear All Sorting',
+          action: 'clearSorting',
+          args: {},
+          expect: 'success',
+          tip: 'Action: clearSorting\nArgs: {} (none)\nExpect: All column sort orders removed' },
+
+        // ── 2. Filtering (per-column) ───────────
+        { section: 'Filtering (per-column)',
+          label: 'Filter City = "Boise"',
+          action: 'filtering',
+          args: { dataField: 'City', filterValue: 'Boise' },
+          expect: 'success',
+          tip: 'Action: filtering\nArgs: { dataField: "City", filterValue: "Boise" }\nExpect: Only rows with City "Boise" shown' },
+
+        { section: 'Filtering (per-column)',
+          label: 'Clear Filter on City',
+          action: 'filtering',
+          args: { dataField: 'City', filterValue: null },
+          expect: 'success',
+          tip: 'Action: filtering\nArgs: { dataField: "City", filterValue: null }\nExpect: City column filter cleared, all rows shown' },
+
+        // ── 3. FilterValue (combined expression) ─
+        { section: 'FilterValue (combined)',
+          label: 'Set State = "California"',
+          action: 'filterValue',
+          args: { expression: ['State', '=', 'California'] },
+          expect: 'success',
+          tip: 'Action: filterValue\nArgs: { expression: ["State", "=", "California"] }\nExpect: Top-level filterValue set; only California rows shown' },
+
+        { section: 'FilterValue (combined)',
+          label: 'Clear filterValue',
+          action: 'filterValue',
+          args: { expression: null },
+          expect: 'success',
+          tip: 'Action: filterValue\nArgs: { expression: null }\nExpect: Top-level filterValue removed, all rows shown' },
+
+        // ── 4. Clear Filter ─────────────────────
+        { section: 'Clear Filter',
+          label: 'Apply City Filter, then Clear All',
+          action: '_sequence_clearFilter',
+          args: {},
+          expect: 'success',
+          tip: 'Sequence:\n1. filtering { dataField: "City", filterValue: "Boise" }\n2. clearFilter {}\nExpect: All filters removed (column + combined)' },
+
+        // ── 5. Searching ────────────────────────
+        { section: 'Searching',
+          label: 'Search "Carter"',
+          action: 'searching',
+          args: { text: 'Carter' },
+          expect: 'success',
+          tip: 'Action: searching\nArgs: { text: "Carter" }\nExpect: Search panel set to "Carter", grid filtered to matching rows' },
+
+        { section: 'Searching',
+          label: 'Clear Search',
+          action: 'searching',
+          args: { text: '' },
+          expect: 'success',
+          tip: 'Action: searching\nArgs: { text: "" }\nExpect: Search cleared, all rows shown' },
+
+        // ── 6. Grouping ─────────────────────────
+        { section: 'Grouping',
+          label: 'Group by State',
+          action: 'grouping',
+          args: { dataField: 'State', groupIndex: 0 },
+          expect: 'success',
+          tip: 'Action: grouping\nArgs: { dataField: "State", groupIndex: 0 }\nExpect: Rows grouped by State at first group level' },
+
+        { section: 'Grouping',
+          label: 'Ungroup State',
+          action: 'grouping',
+          args: { dataField: 'State', groupIndex: undefined },
+          expect: 'success',
+          tip: 'Action: grouping\nArgs: { dataField: "State", groupIndex: undefined }\nExpect: State grouping removed' },
+
+        // ── 7. Paging ───────────────────────────
+        { section: 'Paging',
+          label: 'Set Page Size to 10',
+          action: 'pageSize',
+          args: { pageSize: 10 },
+          expect: 'success',
+          tip: 'Action: pageSize\nArgs: { pageSize: 10 }\nExpect: Grid shows 10 rows per page' },
+
+        { section: 'Paging',
+          label: 'Set Page Size to 5',
+          action: 'pageSize',
+          args: { pageSize: 5 },
+          expect: 'success',
+          tip: 'Action: pageSize\nArgs: { pageSize: 5 }\nExpect: Grid shows 5 rows per page' },
+
+        { section: 'Paging',
+          label: 'Go to Page 2 (index 1)',
+          action: 'pageIndex',
+          args: { pageIndex: 1 },
+          expect: 'success',
+          tip: 'Action: pageIndex\nArgs: { pageIndex: 1 }\nExpect: Grid navigates to second page (0-based index)' },
+
+        { section: 'Paging',
+          label: 'Go to Page 1 (index 0)',
+          action: 'pageIndex',
+          args: { pageIndex: 0 },
+          expect: 'success',
+          tip: 'Action: pageIndex\nArgs: { pageIndex: 0 }\nExpect: Grid returns to first page' },
+
+        { section: 'Paging',
+          label: '⛔ Page Index Out of Range',
+          action: 'pageIndex',
+          args: { pageIndex: 999 },
+          expect: 'failure',
+          tip: 'Action: pageIndex\nArgs: { pageIndex: 999 }\nExpect: FAILURE — index exceeds page count' },
+
+        { section: 'Paging',
+          label: '⛔ Negative Page Size',
+          action: 'pageSize',
+          args: { pageSize: -1 },
+          expect: 'failure',
+          tip: 'Action: pageSize\nArgs: { pageSize: -1 }\nExpect: FAILURE — pageSize must be a positive integer' },
+
+        // ── 8. Row Focusing ─────────────────────
+        { section: 'Row Focusing',
+          label: 'Focus Row Key = 3',
+          action: 'rowFocusing',
+          args: { key: 3 },
+          expect: 'success',
+          tip: 'Action: rowFocusing\nArgs: { key: 3 }\nExpect: Row with ID 3 (Robert Reagan) focused and scrolled into view' },
+
+        { section: 'Row Focusing',
+          label: 'Focus Row Key = 7',
+          action: 'rowFocusing',
+          args: { key: 7 },
+          expect: 'success',
+          tip: 'Action: rowFocusing\nArgs: { key: 7 }\nExpect: Row with ID 7 (Kevin Carter) focused and scrolled into view' },
+
+        // ── 9. Selection ────────────────────────
+        { section: 'Selection',
+          label: 'Select Keys [1, 4, 6]',
+          action: 'selectByKeys',
+          args: { keys: [1, 4, 6], preserve: false },
+          expect: 'success',
+          tip: 'Action: selectByKeys\nArgs: { keys: [1, 4, 6], preserve: false }\nExpect: Rows 1, 4, 6 selected; previous selection replaced' },
+
+        { section: 'Selection',
+          label: 'Select Key [8] (preserve)',
+          action: 'selectByKeys',
+          args: { keys: [8], preserve: true },
+          expect: 'success',
+          tip: 'Action: selectByKeys\nArgs: { keys: [8], preserve: true }\nExpect: Row 8 added to existing selection' },
+
+        { section: 'Selection',
+          label: 'Select by Indexes [0, 2]',
+          action: 'selectByIndexes',
+          args: { indexes: [0, 2] },
+          expect: 'success',
+          tip: 'Action: selectByIndexes\nArgs: { indexes: [0, 2] }\nExpect: Visible rows at positions 0 and 2 selected' },
+
+        { section: 'Selection',
+          label: 'Select All',
+          action: 'selectAll',
+          args: {},
+          expect: 'success',
+          tip: 'Action: selectAll\nArgs: {} (none)\nExpect: All rows across all pages selected' },
+
+        { section: 'Selection',
+          label: 'Deselect All',
+          action: 'deselectAll',
+          args: {},
+          expect: 'success',
+          tip: 'Action: deselectAll\nArgs: {} (none)\nExpect: All rows deselected' },
+
+        { section: 'Selection',
+          label: 'Clear Selection',
+          action: 'clearSelection',
+          args: {},
+          expect: 'success',
+          tip: 'Action: clearSelection\nArgs: {} (none)\nExpect: Selection cleared completely' },
+
+        // ── 10. Columns — Visibility ────────────
+        { section: 'Columns — Visibility',
+          label: 'Hide "HireDate"',
+          action: 'columnsVisibility',
+          args: { dataField: 'HireDate', visible: false },
+          expect: 'success',
+          tip: 'Action: columnsVisibility\nArgs: { dataField: "HireDate", visible: false }\nExpect: HireDate column hidden from grid' },
+
+        { section: 'Columns — Visibility',
+          label: 'Show "HireDate"',
+          action: 'columnsVisibility',
+          args: { dataField: 'HireDate', visible: true },
+          expect: 'success',
+          tip: 'Action: columnsVisibility\nArgs: { dataField: "HireDate", visible: true }\nExpect: HireDate column visible again' },
+
+        { section: 'Columns — Visibility',
+          label: '⛔ Hide Non-Existent Column',
+          action: 'columnsVisibility',
+          args: { dataField: 'Nope', visible: false },
+          expect: 'failure',
+          tip: 'Action: columnsVisibility\nArgs: { dataField: "Nope", visible: false }\nExpect: FAILURE — column "Nope" does not exist' },
+
+        // ── 11. Columns — Reordering ────────────
+        { section: 'Columns — Reordering',
+          label: 'Move "Position" to Index 0',
+          action: 'columnsReorder',
+          args: { dataField: 'Position', visibleIndex: 0 },
+          expect: 'success',
+          tip: 'Action: columnsReorder\nArgs: { dataField: "Position", visibleIndex: 0 }\nExpect: Position column becomes first visible column' },
+
+        { section: 'Columns — Reordering',
+          label: 'Move "Position" back to Index 3',
+          action: 'columnsReorder',
+          args: { dataField: 'Position', visibleIndex: 3 },
+          expect: 'success',
+          tip: 'Action: columnsReorder\nArgs: { dataField: "Position", visibleIndex: 3 }\nExpect: Position column returns to 4th position' },
+
+        // ── 12. Columns — Pinning ───────────────
+        { section: 'Columns — Pinning',
+          label: 'Pin "FirstName" to Left',
+          action: 'columnsPinning',
+          args: { dataField: 'FirstName', fixed: true, fixedPosition: 'left' },
+          expect: 'success',
+          tip: 'Action: columnsPinning\nArgs: { dataField: "FirstName", fixed: true, fixedPosition: "left" }\nExpect: FirstName pinned to left edge' },
+
+        { section: 'Columns — Pinning',
+          label: 'Pin "LastName" to Right',
+          action: 'columnsPinning',
+          args: { dataField: 'LastName', fixed: true, fixedPosition: 'right' },
+          expect: 'success',
+          tip: 'Action: columnsPinning\nArgs: { dataField: "LastName", fixed: true, fixedPosition: "right" }\nExpect: LastName pinned to right edge' },
+
+        { section: 'Columns — Pinning',
+          label: 'Unpin "FirstName"',
+          action: 'columnsPinning',
+          args: { dataField: 'FirstName', fixed: false },
+          expect: 'success',
+          tip: 'Action: columnsPinning\nArgs: { dataField: "FirstName", fixed: false }\nExpect: FirstName unfixed, scrolls normally' },
+
+        { section: 'Columns — Pinning',
+          label: 'Unpin "LastName"',
+          action: 'columnsPinning',
+          args: { dataField: 'LastName', fixed: false },
+          expect: 'success',
+          tip: 'Action: columnsPinning\nArgs: { dataField: "LastName", fixed: false }\nExpect: LastName unfixed, scrolls normally' },
+
+        // ── 13. Columns — Resizing ──────────────
+        { section: 'Columns — Resizing',
+          label: 'Resize "FirstName" to 200px',
+          action: 'columnsResize',
+          args: { dataField: 'FirstName', width: 200 },
+          expect: 'success',
+          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: 200 }\nExpect: FirstName column width set to 200px' },
+
+        { section: 'Columns — Resizing',
+          label: 'Resize "FirstName" to "30%"',
+          action: 'columnsResize',
+          args: { dataField: 'FirstName', width: '30%' },
+          expect: 'success',
+          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: "30%" }\nExpect: FirstName column width set to 30% of grid' },
+
+        { section: 'Columns — Resizing',
+          label: '⛔ Negative Width',
+          action: 'columnsResize',
+          args: { dataField: 'FirstName', width: -50 },
+          expect: 'failure',
+          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: -50 }\nExpect: FAILURE — width must be positive' },
+
+        // ── 14. Validation ──────────────────────
+        { section: 'Validation',
+          label: '⛔ Unknown Action "fooBar"',
+          action: 'fooBar',
+          args: {},
+          expect: 'failure',
+          tip: 'Action: "fooBar" (invalid)\nArgs: {}\nExpect: FAILURE — action name not in the available list' },
+    ];
+
+    /**
+     * ====================================================================
      *  Sample data & DataGrid setup
      * ====================================================================
      */
 
     var sampleData = [
-        { ID: 1, FirstName: 'John',    LastName: 'Heart',    Position: 'CEO',       City: 'Los Angeles', State: 'California', HireDate: '2012-03-15' },
-        { ID: 2, FirstName: 'Olivia',  LastName: 'Peyton',   Position: 'Sales',     City: 'Los Angeles', State: 'California', HireDate: '2012-01-24' },
-        { ID: 3, FirstName: 'Robert',  LastName: 'Reagan',   Position: 'CMO',       City: 'Little Rock', State: 'Arkansas',   HireDate: '2013-05-07' },
-        { ID: 4, FirstName: 'Greta',   LastName: 'Sims',     Position: 'HR',        City: 'San Jose',    State: 'California', HireDate: '2013-08-14' },
-        { ID: 5, FirstName: 'Brett',   LastName: 'Wade',     Position: 'IT',        City: 'Reno',        State: 'Nevada',     HireDate: '2014-02-19' },
-        { ID: 6, FirstName: 'Sandra',  LastName: 'Johnson',  Position: 'Manager',   City: 'Denver',      State: 'Colorado',   HireDate: '2014-05-22' },
-        { ID: 7, FirstName: 'Kevin',   LastName: 'Carter',   Position: 'Logistics', City: 'Boise',       State: 'Idaho',      HireDate: '2015-01-11' },
-        { ID: 8, FirstName: 'Cynthia', LastName: 'Stanwick', Position: 'Analytics', City: 'Little Rock', State: 'Arkansas',   HireDate: '2015-07-03' },
-        { ID: 9, FirstName: 'Kent',    LastName: 'Samuelson', Position: 'Legal',    City: 'Boise',       State: 'Idaho',      HireDate: '2016-09-28' },
-        { ID: 10, FirstName: 'Taylor', LastName: 'Riley',    Position: 'Support',   City: 'San Jose',    State: 'California', HireDate: '2016-12-01' },
+        { ID: 1,  FirstName: 'John',    LastName: 'Heart',     Position: 'CEO',       City: 'Los Angeles', State: 'California', HireDate: '2012-03-15' },
+        { ID: 2,  FirstName: 'Olivia',  LastName: 'Peyton',    Position: 'Sales',     City: 'Los Angeles', State: 'California', HireDate: '2012-01-24' },
+        { ID: 3,  FirstName: 'Robert',  LastName: 'Reagan',    Position: 'CMO',       City: 'Little Rock', State: 'Arkansas',   HireDate: '2013-05-07' },
+        { ID: 4,  FirstName: 'Greta',   LastName: 'Sims',      Position: 'HR',        City: 'San Jose',    State: 'California', HireDate: '2013-08-14' },
+        { ID: 5,  FirstName: 'Brett',   LastName: 'Wade',      Position: 'IT',        City: 'Reno',        State: 'Nevada',     HireDate: '2014-02-19' },
+        { ID: 6,  FirstName: 'Sandra',  LastName: 'Johnson',   Position: 'Manager',   City: 'Denver',      State: 'Colorado',   HireDate: '2014-05-22' },
+        { ID: 7,  FirstName: 'Kevin',   LastName: 'Carter',    Position: 'Logistics', City: 'Boise',       State: 'Idaho',      HireDate: '2015-01-11' },
+        { ID: 8,  FirstName: 'Cynthia', LastName: 'Stanwick',  Position: 'Analytics', City: 'Little Rock', State: 'Arkansas',   HireDate: '2015-07-03' },
+        { ID: 9,  FirstName: 'Kent',    LastName: 'Samuelson', Position: 'Legal',     City: 'Boise',       State: 'Idaho',      HireDate: '2016-09-28' },
+        { ID: 10, FirstName: 'Taylor',  LastName: 'Riley',     Position: 'Support',   City: 'San Jose',    State: 'California', HireDate: '2016-12-01' },
     ];
 
     $(() => {
@@ -451,291 +773,116 @@
         }).dxDataGrid('instance');
 
         const api = new DataGridToolingApi(dataGrid);
-
-        // ── Log helper ──
-
         const $log = $('#log');
+
+        // ── Log helpers ──
 
         function logSection(title) {
             $log.append('<div class="log-section">── ' + title + ' ──</div>');
         }
 
-        function logResult(label, result) {
+        function logResult(label, result, expectedStatus) {
             var cls = result.status === 'success' ? 'log-success' : 'log-failure';
-            var text = result.status === 'success'
-                ? '✓ ' + label
-                : '✗ ' + label + ' — ' + result.error;
+            var icon = result.status === 'success' ? '✓' : '✗';
+            var text = icon + ' ' + label;
+            if (result.status === 'failure') text += ' — ' + result.error;
             $log.append('<div class="' + cls + '">' + text + '</div>');
+
+            // Warn if outcome doesn't match expectation
+            if (expectedStatus && result.status !== expectedStatus) {
+                $log.append('<div class="log-failure" style="margin-left:18px">⚠ Unexpected! Expected ' + expectedStatus + ' but got ' + result.status + '</div>');
+            }
         }
 
-        // ── Run all demos ──
+        function logArgs(argsObj) {
+            $log.append('<div class="log-args">↳ args: ' + JSON.stringify(argsObj) + '</div>');
+        }
 
-        $('#runButton').dxButton({
-            text: 'Run All DataGrid Tooling API Actions',
+        // ── Execute a single action def ──
+
+        async function runActionDef(def) {
+            // Special sequence: clearFilter demo
+            if (def.action === '_sequence_clearFilter') {
+                logSection(def.section);
+                $log.append('<div class="log-args">Step 1: filtering { dataField: "City", filterValue: "Boise" }</div>');
+                await api.action('filtering', { dataField: 'City', filterValue: 'Boise' });
+                $log.append('<div class="log-args">Step 2: clearFilter {}</div>');
+                var result = await api.action('clearFilter', {});
+                logResult(def.label, result, def.expect);
+                return;
+            }
+
+            logSection(def.section + ' → ' + def.label);
+            logArgs(def.args);
+            var result = await api.action(def.action, def.args);
+            logResult(def.label, result, def.expect);
+        }
+
+        // ── Build action buttons panel ──
+
+        var $panel = $('#actions-panel');
+        var currentSection = '';
+        var $sectionBody = null;
+
+        ACTION_DEFS.forEach(function(def, idx) {
+            // Create section if new
+            if (def.section !== currentSection) {
+                currentSection = def.section;
+                var $section = $('<div class="action-section">');
+                $section.append('<div class="action-section-header">' + currentSection + '</div>');
+                $sectionBody = $('<div class="action-section-body">');
+                $section.append($sectionBody);
+                $panel.append($section);
+            }
+
+            var $wrap = $('<div class="action-btn-wrap">');
+            var $btnContainer = $('<div>');
+            $wrap.append($btnContainer);
+
+            // Tooltip
+            $wrap.append('<div class="tip">' + def.tip + '</div>');
+            $sectionBody.append($wrap);
+
+            // Create button with expected-result hint in the label
+            var expectHint = def.expect === 'failure' ? '  (expect ✗)' : '';
+            $btnContainer.dxButton({
+                text: def.label + expectHint,
+                type: def.expect === 'failure' ? 'danger' : 'normal',
+                stylingMode: 'outlined',
+                onClick: async function() {
+                    await runActionDef(def);
+                    // Scroll log to bottom
+                    var logEl = $log[0];
+                    logEl.scrollTop = logEl.scrollHeight;
+                },
+            });
+        });
+
+        // ── Run All button ──
+
+        $('#runAllButton').dxButton({
+            text: '▶ Run All Actions',
             type: 'default',
             onClick: async function() {
                 $log.empty();
                 $log.append('<div class="log-section">Available actions: ' + api.getAvailableActions().join(', ') + '</div>');
 
-                // ============================================
-                // 1. Sorting
-                // ============================================
-                logSection('Sorting');
+                for (var i = 0; i < ACTION_DEFS.length; i++) {
+                    await runActionDef(ACTION_DEFS[i]);
+                }
 
-                logResult(
-                    'Sort LastName ASC',
-                    await api.action('sorting', { dataField: 'LastName', sortOrder: 'asc' })
-                );
-                logResult(
-                    'Sort LastName DESC',
-                    await api.action('sorting', { dataField: 'LastName', sortOrder: 'desc' })
-                );
-                logResult(
-                    'Remove sorting from LastName',
-                    await api.action('sorting', { dataField: 'LastName', sortOrder: 'none' })
-                );
-                logResult(
-                    'Sort non-existent column (should fail)',
-                    await api.action('sorting', { dataField: 'NoSuchField', sortOrder: 'asc' })
-                );
-                logResult(
-                    'Clear all sorting',
-                    await api.action('clearSorting', {})
-                );
+                $log.append('<div class="log-section">── All ' + ACTION_DEFS.length + ' actions executed ──</div>');
+                $log[0].scrollTop = $log[0].scrollHeight;
+            },
+        });
 
-                // ============================================
-                // 2. Filtering (per-column)
-                // ============================================
-                logSection('Filtering (per-column)');
+        // ── Clear Log button ──
 
-                logResult(
-                    'Filter City = "Boise"',
-                    await api.action('filtering', { dataField: 'City', filterValue: 'Boise' })
-                );
-                logResult(
-                    'Clear filter on City',
-                    await api.action('filtering', { dataField: 'City', filterValue: null })
-                );
-
-                // ============================================
-                // 3. FilterValue (combined/builder expression)
-                // ============================================
-                logSection('FilterValue (combined)');
-
-                logResult(
-                    'Set filterValue: State = "California"',
-                    await api.action('filterValue', {
-                        expression: ['State', '=', 'California']
-                    })
-                );
-                logResult(
-                    'Clear filterValue',
-                    await api.action('filterValue', { expression: null })
-                );
-
-                // ============================================
-                // 4. Clear filter
-                // ============================================
-                logSection('Clear Filter');
-
-                // First apply a filter, then clear
-                await api.action('filtering', { dataField: 'City', filterValue: 'Boise' });
-                logResult(
-                    'Clear all filters',
-                    await api.action('clearFilter', {})
-                );
-
-                // ============================================
-                // 5. Searching
-                // ============================================
-                logSection('Searching');
-
-                logResult(
-                    'Search "Carter"',
-                    await api.action('searching', { text: 'Carter' })
-                );
-                logResult(
-                    'Clear search',
-                    await api.action('searching', { text: '' })
-                );
-
-                // ============================================
-                // 6. Grouping
-                // ============================================
-                logSection('Grouping');
-
-                logResult(
-                    'Group by State (index 0)',
-                    await api.action('grouping', { dataField: 'State', groupIndex: 0 })
-                );
-                logResult(
-                    'Ungroup State',
-                    await api.action('grouping', { dataField: 'State', groupIndex: undefined })
-                );
-
-                // ============================================
-                // 7. Paging
-                // ============================================
-                logSection('Paging');
-
-                logResult(
-                    'Set pageSize to 10',
-                    await api.action('pageSize', { pageSize: 10 })
-                );
-                logResult(
-                    'Set pageSize to 5',
-                    await api.action('pageSize', { pageSize: 5 })
-                );
-                logResult(
-                    'Go to page 1 (0-based)',
-                    await api.action('pageIndex', { pageIndex: 1 })
-                );
-                logResult(
-                    'Go to page 0',
-                    await api.action('pageIndex', { pageIndex: 0 })
-                );
-                logResult(
-                    'pageIndex out of range (should fail)',
-                    await api.action('pageIndex', { pageIndex: 999 })
-                );
-                logResult(
-                    'Negative pageSize (should fail)',
-                    await api.action('pageSize', { pageSize: -1 })
-                );
-
-                // ============================================
-                // 8. Row Focusing
-                // ============================================
-                logSection('Row Focusing');
-
-                logResult(
-                    'Focus row with key 3',
-                    await api.action('rowFocusing', { key: 3 })
-                );
-                logResult(
-                    'Focus row with key 7',
-                    await api.action('rowFocusing', { key: 7 })
-                );
-
-                // ============================================
-                // 9. Selection
-                // ============================================
-                logSection('Selection');
-
-                logResult(
-                    'Select by keys [1, 4, 6]',
-                    await api.action('selectByKeys', { keys: [1, 4, 6], preserve: false })
-                );
-                logResult(
-                    'Select by keys [8] (preserve)',
-                    await api.action('selectByKeys', { keys: [8], preserve: true })
-                );
-                logResult(
-                    'Select by indexes [0, 2]',
-                    await api.action('selectByIndexes', { indexes: [0, 2] })
-                );
-                logResult(
-                    'Select all',
-                    await api.action('selectAll', {})
-                );
-                logResult(
-                    'Deselect all',
-                    await api.action('deselectAll', {})
-                );
-                logResult(
-                    'Select rows then clear selection',
-                    await api.action('selectByKeys', { keys: [2, 5], preserve: false })
-                );
-                logResult(
-                    'Clear selection',
-                    await api.action('clearSelection', {})
-                );
-
-                // ============================================
-                // 10. Columns — Visibility
-                // ============================================
-                logSection('Columns — Visibility');
-
-                logResult(
-                    'Hide column "HireDate"',
-                    await api.action('columnsVisibility', { dataField: 'HireDate', visible: false })
-                );
-                logResult(
-                    'Show column "HireDate"',
-                    await api.action('columnsVisibility', { dataField: 'HireDate', visible: true })
-                );
-                logResult(
-                    'Hide non-existent column (should fail)',
-                    await api.action('columnsVisibility', { dataField: 'Nope', visible: false })
-                );
-
-                // ============================================
-                // 11. Columns — Reordering
-                // ============================================
-                logSection('Columns — Reordering');
-
-                logResult(
-                    'Move "Position" to visibleIndex 0',
-                    await api.action('columnsReorder', { dataField: 'Position', visibleIndex: 0 })
-                );
-                logResult(
-                    'Move "Position" back to visibleIndex 3',
-                    await api.action('columnsReorder', { dataField: 'Position', visibleIndex: 3 })
-                );
-
-                // ============================================
-                // 12. Columns — Pinning
-                // ============================================
-                logSection('Columns — Pinning');
-
-                logResult(
-                    'Pin "FirstName" to left',
-                    await api.action('columnsPinning', { dataField: 'FirstName', fixed: true, fixedPosition: 'left' })
-                );
-                logResult(
-                    'Pin "LastName" to right',
-                    await api.action('columnsPinning', { dataField: 'LastName', fixed: true, fixedPosition: 'right' })
-                );
-                logResult(
-                    'Unpin "FirstName"',
-                    await api.action('columnsPinning', { dataField: 'FirstName', fixed: false })
-                );
-                logResult(
-                    'Unpin "LastName"',
-                    await api.action('columnsPinning', { dataField: 'LastName', fixed: false })
-                );
-
-                // ============================================
-                // 13. Columns — Resizing
-                // ============================================
-                logSection('Columns — Resizing');
-
-                logResult(
-                    'Resize "FirstName" to 200px',
-                    await api.action('columnsResize', { dataField: 'FirstName', width: 200 })
-                );
-                logResult(
-                    'Resize "FirstName" to "30%"',
-                    await api.action('columnsResize', { dataField: 'FirstName', width: '30%' })
-                );
-                logResult(
-                    'Resize with negative width (should fail)',
-                    await api.action('columnsResize', { dataField: 'FirstName', width: -50 })
-                );
-
-                // ============================================
-                // 14. Validation — unknown action
-                // ============================================
-                logSection('Validation — Unknown Action');
-
-                logResult(
-                    'Call unknown action "fooBar" (should fail)',
-                    await api.action('fooBar', {})
-                );
-
-                // ── Done ──
-                $log.append('<div class="log-section">── All actions executed ──</div>');
-            }
+        $('#clearLogButton').dxButton({
+            text: '🗑 Clear Log',
+            type: 'normal',
+            stylingMode: 'outlined',
+            onClick: function() { $log.empty(); },
         });
     });
     </script>
