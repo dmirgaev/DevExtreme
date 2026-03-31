@@ -1,6 +1,7 @@
 import type dxDataGrid from '../js/ui/data_grid';
-import type { SortOrder } from '../js/common';
-import type { FixedPosition, SummaryType } from '../js/common/grids';
+import type { DataType, SortOrder } from '../js/common';
+import type { FilterType, FixedPosition, SelectedFilterOperation, SummaryType } from '../js/common/grids';
+import { isItemsArray } from '../js/common/data';
 
 // ──────────────────────────────────────────────
 // Filter expression types (recursive, no `any`)
@@ -27,6 +28,62 @@ export type FilterExpression =
   | FilterExpression[];
 
 // ──────────────────────────────────────────────
+// Column filter value (per‑column filterValue / filterValues)
+// ──────────────────────────────────────────────
+
+type ColumnFilterValue = string | number | boolean | Date | null;
+
+// ──────────────────────────────────────────────
+// Column state shape (as stored in grid.state().columns)
+//
+// Field list mirrors USER_STATE_FIELD_NAMES from
+//   grids/grid_core/columns_controller/const.ts
+// ──────────────────────────────────────────────
+
+interface ColumnState {
+  dataField?: string;
+  name?: string;
+  dataType?: DataType;
+  visibleIndex?: number;
+  visible?: boolean;
+  sortOrder?: SortOrder;
+  lastSortOrder?: SortOrder;
+  sortIndex?: number;
+  groupIndex?: number;
+  filterValue?: ColumnFilterValue;
+  bufferedFilterValue?: ColumnFilterValue;
+  selectedFilterOperation?: SelectedFilterOperation;
+  bufferedSelectedFilterOperation?: SelectedFilterOperation;
+  added?: boolean;
+  filterValues?: ColumnFilterValue[];
+  filterType?: FilterType;
+  width?: number | string;
+  fixed?: boolean;
+  fixedPosition?: FixedPosition;
+}
+
+// ──────────────────────────────────────────────
+// Grid state shape (as returned by grid.state())
+//
+// Assembled from getDataState(), getUserState(),
+// and processLoadState() in m_state_storing.ts
+// ──────────────────────────────────────────────
+
+interface GridState<TKey = unknown> {
+  columns?: ColumnState[];
+  filterValue?: FilterExpression | null;
+  filterPanel?: { filterEnabled?: boolean };
+  searchText?: string;
+  pageIndex?: number;
+  pageSize?: number;
+  focusedRowKey?: TKey | null;
+  selectedRowKeys?: TKey[];
+  selectionFilter?: FilterExpression;
+  allowedPageSizes?: number[];
+  exportSelectionOnly?: boolean;
+}
+
+// ──────────────────────────────────────────────
 // Action result
 // ──────────────────────────────────────────────
 
@@ -37,6 +94,26 @@ export type ActionResult =
 // ──────────────────────────────────────────────
 // Action names
 // ──────────────────────────────────────────────
+//
+// NOTE on hybrid actions:
+//
+// • selectByIndexes — state stores selectedRowKeys (by key),
+//   not by visible row index. As a workaround we READ
+//   grid.getVisibleRows() to resolve indexes → keys, then
+//   WRITE through state.selectedRowKeys. The mutation is
+//   state-only; the read is a non-mutating bridge.
+//
+// • selectAll — state stores an explicit selectedRowKeys array.
+//   As a workaround we READ all records from the underlying
+//   store via grid.getDataSource().store().load(), extract
+//   their keys, then WRITE through state.selectedRowKeys.
+//   For large remote data sets this may be expensive since
+//   it loads the full data set to the client.
+//
+// • summary / clearSummary — summary configuration is NOT part
+//   of grid.state(). As a workaround we READ/WRITE through
+//   grid.option('summary', …). This is a full hybrid: both
+//   read and write bypass state.
 
 export const ACTION_NAMES = [
   'sorting',
@@ -209,19 +286,21 @@ function isActionName(name: string): name is ActionName {
   return (ACTION_NAMES as readonly string[]).includes(name);
 }
 
-function toNativePromise<T>(value: PromiseLike<T> | T): Promise<T> {
-  return Promise.resolve(value);
-}
-
 // ──────────────────────────────────────────────
-// DataGrid Tooling API
+// DataGrid State API
+//
+// All mutations are performed exclusively through
+// grid.state(newState). No option(), columnOption(),
+// or imperative methods (clearSorting, selectRows, etc.)
+// are used — except for summary/clearSummary which are
+// hybrid actions (summary config is not part of state).
 // ──────────────────────────────────────────────
 
 type ActionHandler<TKey> = {
   [A in ActionName]: (payload: ActionPayloadMap<TKey>[A]) => Promise<ActionResult>;
 };
 
-export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
+export class DataGridStateApi<TRowData = unknown, TKey = unknown> {
   private readonly grid: dxDataGrid<TRowData, TKey>;
   private readonly handlers: ActionHandler<TKey>;
 
@@ -277,28 +356,42 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     }
   }
 
-  // ── Validation helpers ───────────────────────
+  // ── State helpers ─────────────────────────────
 
-  private columnExists(dataField: string): boolean {
-    return this.grid.columnOption(dataField) !== undefined;
+  private getState(): GridState<TKey> {
+    // grid.state() is typed as `any` in the DevExtreme public API;
+    // the return type annotation narrows to our strict GridState.
+    return this.grid.state();
   }
 
-  private validateColumn(dataField: string): ActionResult | null {
-    if (!this.columnExists(dataField)) {
-      return failure(`Column "${dataField}" does not exist.`);
+  private setState(state: GridState<TKey>): void {
+    // grid.state(s) accepts `any` in the DevExtreme public API;
+    // our strictly-typed GridState is assignable without casts.
+    this.grid.state(state);
+  }
+
+  // ── Column helpers ────────────────────────────
+
+  private findColumnIndex(state: GridState<TKey>, dataField: string): number {
+    return (state.columns ?? []).findIndex((c) => c.dataField === dataField);
+  }
+
+  private validateColumn(state: GridState<TKey>, dataField: string): ActionResult | null {
+    if (this.findColumnIndex(state, dataField) === -1) {
+      return failure(`Column "${dataField}" does not exist in state.`);
     }
     return null;
   }
 
   // ── Data readiness helper ─────────────────────
-  // After changing sorting, filtering, grouping, searching, or column
-  // options, the grid may need to reload data from a remote server.
-  // Calling refresh() and awaiting its promise ensures the round‑trip
-  // completes before we verify the outcome.
+  // After setting state, the grid reloads data internally
+  // (applyState calls dataController.reset()). We call
+  // refresh() to ensure the round‑trip completes before
+  // verifying the outcome.
 
   private async waitForDataReady(): Promise<ActionResult | null> {
     try {
-      await toNativePromise(this.grid.refresh());
+      await Promise.resolve(this.grid.refresh());
       return null;
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
@@ -312,17 +405,32 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleSorting(payload: SortingPayload): Promise<ActionResult> {
     const { dataField, sortOrder } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
+    const colIdx = this.findColumnIndex(state, dataField);
     const effectiveOrder = sortOrder === 'none' ? undefined : sortOrder;
-    this.grid.columnOption(dataField, 'sortOrder', effectiveOrder as string | undefined);
+
+    state.columns![colIdx].sortOrder = effectiveOrder;
+    if (effectiveOrder === undefined) {
+      state.columns![colIdx].sortIndex = undefined;
+    } else {
+      // Assign the next sortIndex (after all existing sorted columns)
+      const maxSortIdx = (state.columns ?? [])
+        .filter((c, i) => i !== colIdx && c.sortOrder !== undefined && c.sortIndex !== undefined)
+        .reduce((max, c) => Math.max(max, c.sortIndex ?? -1), -1);
+      state.columns![colIdx].sortIndex = maxSortIdx + 1;
+    }
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const actual = this.grid.columnOption(dataField, 'sortOrder') as string | undefined;
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.sortOrder;
     if (effectiveOrder === undefined && actual !== undefined) {
       return failure(`Sorting was not cleared for column "${dataField}". Current sortOrder: "${String(actual)}".`);
     }
@@ -334,13 +442,20 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   }
 
   private async handleClearSorting(_payload: ClearSortingPayload): Promise<ActionResult> {
-    this.grid.clearSorting();
+    const state = this.getState();
+
+    for (const col of state.columns ?? []) {
+      col.sortOrder = undefined;
+      col.sortIndex = undefined;
+    }
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const columns = this.grid.getVisibleColumns();
-    const stillSorted = columns.filter((c) => c.sortOrder !== undefined);
+    const newState = this.getState();
+    const stillSorted = (newState.columns ?? []).filter((c) => c.sortOrder !== undefined);
     if (stillSorted.length > 0) {
       const names = stillSorted.map((c) => c.dataField ?? c.name ?? 'unknown');
       return failure(`clearSorting did not clear all columns. Still sorted: ${names.join(', ')}.`);
@@ -353,16 +468,21 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleFiltering(payload: FilteringPayload): Promise<ActionResult> {
     const { dataField, filterValue } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
-    this.grid.columnOption(dataField, 'filterValue', filterValue);
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].filterValue = filterValue === null ? undefined : filterValue;
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const actual = this.grid.columnOption(dataField, 'filterValue') as unknown;
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.filterValue;
     if (filterValue === null && actual !== undefined && actual !== null) {
       return failure(`Filter was not cleared for column "${dataField}". Current filterValue: "${String(actual)}".`);
     }
@@ -377,20 +497,24 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleFilterValue(payload: FilterValuePayload): Promise<ActionResult> {
     const { expression } = payload;
+    const state = this.getState();
 
-    this.grid.option('filterValue', expression as never);
+    state.filterValue = expression;
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const actual = this.grid.option('filterValue');
+    const newState = this.getState();
+    const actual = newState.filterValue;
     if (expression === null) {
       if (actual !== null && actual !== undefined) {
         return failure(`filterValue was not cleared. Current value: ${JSON.stringify(actual)}.`);
       }
     } else {
       if (actual === null || actual === undefined) {
-        return failure('filterValue was not applied — grid returned null/undefined.');
+        return failure('filterValue was not applied — state returned null/undefined.');
       }
     }
 
@@ -400,11 +524,30 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   // -- Clear filter ------------------------------
 
   private async handleClearFilter(_payload: ClearFilterPayload): Promise<ActionResult> {
-    this.grid.clearFilter();
+    const state = this.getState();
+
+    // Clear the combined filterValue
+    state.filterValue = undefined;
+
+    // Clear per-column filter state
+    for (const col of state.columns ?? []) {
+      col.filterValue = undefined;
+      col.filterValues = undefined;
+      col.filterType = undefined;
+      col.selectedFilterOperation = undefined;
+      col.bufferedFilterValue = undefined;
+      col.bufferedSelectedFilterOperation = undefined;
+    }
+
+    // Clear search text (clearFilter clears all filter sources)
+    state.searchText = '';
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
+    // Verify via getCombinedFilter (this is a read-only check, not a state mutation)
     const combined = this.grid.getCombinedFilter();
     if (combined !== undefined) {
       return failure(`clearFilter did not remove all filters. Combined filter: ${JSON.stringify(combined)}.`);
@@ -417,15 +560,19 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleSearching(payload: SearchingPayload): Promise<ActionResult> {
     const { text } = payload;
+    const state = this.getState();
 
-    this.grid.searchByText(text);
+    state.searchText = text;
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const actual = this.grid.option('searchPanel.text') as string;
+    const newState = this.getState();
+    const actual = newState.searchText ?? '';
     if (actual !== text) {
-      return failure(`Expected searchPanel.text "${text}", got "${actual}".`);
+      return failure(`Expected searchText "${text}", got "${actual}".`);
     }
 
     return success();
@@ -435,16 +582,21 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleGrouping(payload: GroupingPayload): Promise<ActionResult> {
     const { dataField, groupIndex } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
-    this.grid.columnOption(dataField, 'groupIndex', groupIndex as number | undefined);
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].groupIndex = groupIndex;
+
+    this.setState(state);
 
     const refreshError = await this.waitForDataReady();
     if (refreshError) return refreshError;
 
-    const actual = this.grid.columnOption(dataField, 'groupIndex') as number | undefined;
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.groupIndex;
     if (groupIndex === undefined && actual !== undefined && actual !== -1) {
       return failure(`Grouping was not cleared for column "${dataField}". Current groupIndex: ${String(actual)}.`);
     }
@@ -469,11 +621,17 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
       return failure(`pageIndex ${idx} is out of range. Page count: ${pageCount}.`);
     }
 
-    await toNativePromise(this.grid.pageIndex(idx));
+    const state = this.getState();
+    state.pageIndex = idx;
 
-    const actual = this.grid.pageIndex();
-    if (actual !== idx) {
-      return failure(`Expected pageIndex ${idx}, got ${actual}.`);
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    if (newState.pageIndex !== idx) {
+      return failure(`Expected pageIndex ${idx}, got ${newState.pageIndex}.`);
     }
 
     return success();
@@ -486,11 +644,17 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
       return failure(`pageSize must be a positive integer. Got: ${size}.`);
     }
 
-    this.grid.pageSize(size);
+    const state = this.getState();
+    state.pageSize = size;
 
-    const actual = this.grid.pageSize();
-    if (actual !== size) {
-      return failure(`Expected pageSize ${size}, got ${actual}.`);
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    if (newState.pageSize !== size) {
+      return failure(`Expected pageSize ${size}, got ${newState.pageSize}.`);
     }
 
     return success();
@@ -501,17 +665,29 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   private async handleRowFocusing(payload: RowFocusingPayload<TKey>): Promise<ActionResult> {
     const { key } = payload;
 
-    const focusedRowEnabled = this.grid.option('focusedRowEnabled') as boolean;
+    // grid.option() returns `boolean | undefined` for focusedRowEnabled;
+    // undefined means the option is not set (defaults to false).
+    const focusedRowEnabled: boolean = this.grid.option('focusedRowEnabled') ?? false;
     if (!focusedRowEnabled) {
       return failure('focusedRowEnabled is not true. Enable it before using rowFocusing.');
     }
 
-    this.grid.option('focusedRowKey', key);
-    await toNativePromise(this.grid.navigateToRow(key));
+    const state = this.getState();
+    state.focusedRowKey = key;
 
-    const actual = this.grid.option('focusedRowKey') as TKey;
-    if (actual !== key) {
-      return failure(`Expected focusedRowKey ${JSON.stringify(key)}, got ${JSON.stringify(actual)}.`);
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    // Also navigate to ensure the row is scrolled into view.
+    // navigateToRow is a UI convenience — not state, but needed for
+    // the same UX as the Tooling API version.
+    await Promise.resolve(this.grid.navigateToRow(key));
+
+    const newState = this.getState();
+    if (newState.focusedRowKey !== key) {
+      return failure(`Expected focusedRowKey ${JSON.stringify(key)}, got ${JSON.stringify(newState.focusedRowKey)}.`);
     }
 
     return success();
@@ -521,11 +697,36 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleSelectByKeys(payload: SelectByKeysPayload<TKey>): Promise<ActionResult> {
     const { keys, preserve } = payload;
+    const state = this.getState();
 
-    await toNativePromise(this.grid.selectRows(keys, preserve));
+    let newKeys: TKey[];
+    if (preserve) {
+      const existing = state.selectedRowKeys ?? [];
+      const existingSet = new Set(existing.map((k) => JSON.stringify(k)));
+      const merged = [...existing];
+      for (const k of keys) {
+        if (!existingSet.has(JSON.stringify(k))) {
+          merged.push(k);
+        }
+      }
+      newKeys = merged;
+    } else {
+      newKeys = keys;
+    }
 
-    const selected = this.grid.getSelectedRowKeys() as TKey[];
-    const allPresent = keys.every((k) => selected.includes(k));
+    state.selectedRowKeys = newKeys;
+
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    const selected = newState.selectedRowKeys ?? [];
+    const allPresent = keys.every((k) => {
+      const kStr = JSON.stringify(k);
+      return selected.some((s) => JSON.stringify(s) === kStr);
+    });
     if (!allPresent) {
       return failure(
         `Not all requested keys were selected. Requested: ${JSON.stringify(keys)}, actual: ${JSON.stringify(selected)}.`,
@@ -535,6 +736,8 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     return success();
   }
 
+  // Hybrid: READ grid.getVisibleRows() to resolve indexes → keys,
+  //         WRITE through state.selectedRowKeys.
   private async handleSelectByIndexes(payload: SelectByIndexesPayload): Promise<ActionResult> {
     const { indexes } = payload;
 
@@ -543,20 +746,70 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
       return failure(`Invalid row index: ${invalidIdx}. Indexes must be non‑negative integers.`);
     }
 
-    await toNativePromise(this.grid.selectRowsByIndexes(indexes));
+    // Read-only bridge: resolve visible row indexes to keys
+    const visibleRows = this.grid.getVisibleRows();
+    const dataRows = visibleRows.filter((r) => r.rowType === 'data');
+    const keys: TKey[] = [];
 
-    const selected = this.grid.getSelectedRowKeys() as TKey[];
+    for (const idx of indexes) {
+      if (idx >= dataRows.length) {
+        return failure(
+          `Row index ${idx} is out of range. Visible data row count: ${dataRows.length}.`,
+        );
+      }
+      keys.push(dataRows[idx].key);
+    }
+
+    // Mutate via state
+    const state = this.getState();
+    state.selectedRowKeys = keys;
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    const selected = newState.selectedRowKeys ?? [];
     if (selected.length === 0 && indexes.length > 0) {
-      return failure('selectRowsByIndexes resulted in empty selection.');
+      return failure('selectByIndexes resulted in empty selection.');
     }
 
     return success();
   }
 
+  // Hybrid: READ all records from the underlying store to collect
+  //         every key, WRITE through state.selectedRowKeys.
+  //         For large remote data sets this loads the full data set.
   private async handleSelectAll(_payload: SelectAllPayload): Promise<ActionResult> {
-    await toNativePromise(this.grid.selectAll());
+    const dataSource = this.grid.getDataSource();
+    if (!dataSource) {
+      return failure('No data source available.');
+    }
 
-    const selected = this.grid.getSelectedRowKeys() as TKey[];
+    const store = dataSource.store();
+
+    // Load every record from the store (ignoring current paging/filter
+    // so we get the same semantics as grid.selectAll()).
+    const loadResult = await Promise.resolve(store.load());
+
+    if (!isItemsArray(loadResult)) {
+      return failure('selectAll: store.load() returned grouped or object result instead of a plain array.');
+    }
+
+    // Use the grid's own keyOf() to extract keys — this correctly
+    // handles both simple (string) and composite (string[]) key
+    // expressions without manual property access or casts.
+    const allKeys: TKey[] = loadResult.map((item) => this.grid.keyOf(item));
+
+    const state = this.getState();
+    state.selectedRowKeys = allKeys;
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    const selected = newState.selectedRowKeys ?? [];
     const total = this.grid.totalCount();
     if (total > 0 && selected.length === 0) {
       return failure('selectAll resulted in empty selection.');
@@ -566,9 +819,16 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   }
 
   private async handleDeselectAll(_payload: DeselectAllPayload): Promise<ActionResult> {
-    await toNativePromise(this.grid.deselectAll());
+    const state = this.getState();
+    state.selectedRowKeys = [];
 
-    const selected = this.grid.getSelectedRowKeys() as TKey[];
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    const selected = newState.selectedRowKeys ?? [];
     if (selected.length !== 0) {
       return failure(`deselectAll did not clear selection. Still selected: ${selected.length} rows.`);
     }
@@ -577,9 +837,16 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   }
 
   private async handleClearSelection(_payload: ClearSelectionPayload): Promise<ActionResult> {
-    this.grid.clearSelection();
+    const state = this.getState();
+    state.selectedRowKeys = [];
 
-    const selected = this.grid.getSelectedRowKeys() as TKey[];
+    this.setState(state);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
+    const newState = this.getState();
+    const selected = newState.selectedRowKeys ?? [];
     if (selected.length !== 0) {
       return failure(`clearSelection did not clear selection. Still selected: ${selected.length} rows.`);
     }
@@ -591,13 +858,18 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleColumnsVisibility(payload: ColumnsVisibilityPayload): Promise<ActionResult> {
     const { dataField, visible } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
-    this.grid.columnOption(dataField, 'visible', visible);
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].visible = visible;
 
-    const actual = this.grid.columnOption(dataField, 'visible') as boolean;
+    this.setState(state);
+
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.visible;
     if (actual !== visible) {
       return failure(`Expected visible=${String(visible)} for column "${dataField}", got ${String(actual)}.`);
     }
@@ -609,17 +881,22 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleColumnsReorder(payload: ColumnsReorderPayload): Promise<ActionResult> {
     const { dataField, visibleIndex } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
     if (!Number.isInteger(visibleIndex) || visibleIndex < 0) {
       return failure(`visibleIndex must be a non‑negative integer. Got: ${visibleIndex}.`);
     }
 
-    this.grid.columnOption(dataField, 'visibleIndex', visibleIndex);
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].visibleIndex = visibleIndex;
 
-    const actual = this.grid.columnOption(dataField, 'visibleIndex') as number;
+    this.setState(state);
+
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.visibleIndex;
     if (actual !== visibleIndex) {
       return failure(`Expected visibleIndex ${visibleIndex} for column "${dataField}", got ${actual}.`);
     }
@@ -631,23 +908,26 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleColumnsPinning(payload: ColumnsPinningPayload): Promise<ActionResult> {
     const { dataField, fixed, fixedPosition } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
-    this.grid.columnOption(dataField, {
-      fixed,
-      fixedPosition: fixed ? (fixedPosition ?? 'left') : undefined,
-    });
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].fixed = fixed;
+    state.columns![colIdx].fixedPosition = fixed ? (fixedPosition ?? 'left') : undefined;
 
-    const actualFixed = this.grid.columnOption(dataField, 'fixed') as boolean;
+    this.setState(state);
+
+    const newState = this.getState();
+    const actualFixed = newState.columns?.[colIdx]?.fixed;
     if (actualFixed !== fixed) {
       return failure(`Expected fixed=${String(fixed)} for column "${dataField}", got ${String(actualFixed)}.`);
     }
 
     if (fixed) {
       const expectedPos = fixedPosition ?? 'left';
-      const actualPos = this.grid.columnOption(dataField, 'fixedPosition') as string | undefined;
+      const actualPos = newState.columns?.[colIdx]?.fixedPosition;
       if (actualPos !== expectedPos) {
         return failure(
           `Expected fixedPosition "${expectedPos}" for column "${dataField}", got "${String(actualPos)}".`,
@@ -662,17 +942,22 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleColumnsResize(payload: ColumnsResizePayload): Promise<ActionResult> {
     const { dataField, width } = payload;
+    const state = this.getState();
 
-    const colError = this.validateColumn(dataField);
+    const colError = this.validateColumn(state, dataField);
     if (colError) return colError;
 
     if (typeof width === 'number' && width <= 0) {
       return failure(`width must be a positive number or a CSS string. Got: ${width}.`);
     }
 
-    this.grid.columnOption(dataField, 'width', width);
+    const colIdx = this.findColumnIndex(state, dataField);
+    state.columns![colIdx].width = width;
 
-    const actual = this.grid.columnOption(dataField, 'width') as number | string;
+    this.setState(state);
+
+    const newState = this.getState();
+    const actual = newState.columns?.[colIdx]?.width;
     if (actual !== width) {
       return failure(`Expected width ${String(width)} for column "${dataField}", got ${String(actual)}.`);
     }
@@ -680,7 +965,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     return success();
   }
 
-  // -- Summary (aggregation) ---------------------
+  // -- Summary (aggregation) — hybrid ------------
+  // Summary configuration is NOT part of grid.state().
+  // We read/write through grid.option('summary', …).
 
   private async handleSummary(payload: SummaryPayload): Promise<ActionResult> {
     if (payload.totalItems === undefined && payload.groupItems === undefined) {
@@ -735,6 +1022,8 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     return success();
   }
 }
+
+
 
 
 

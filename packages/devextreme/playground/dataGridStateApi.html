@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>DataGrid Tooling API — Playground</title>
+    <title>DataGrid State API — Playground</title>
 
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
@@ -124,6 +124,21 @@
         }
         #dataModeBadge.local  { background: #e8f5e9; color: #2e7d32; }
         #dataModeBadge.remote { background: #e3f2fd; color: #1565c0; }
+
+        /* ── Limitations banner ── */
+        #limitations-banner {
+            margin-top: 16px;
+            padding: 12px 16px;
+            background: #fff3e0;
+            border: 1px solid #ffcc80;
+            border-radius: 6px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        #limitations-banner h3 { margin: 0 0 6px; font-size: 14px; color: #e65100; }
+        #limitations-banner ul { margin: 0; padding-left: 20px; }
+        #limitations-banner li { margin-bottom: 4px; }
+        #limitations-banner code { background: #fbe9e7; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
     </style>
 
     <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
@@ -132,10 +147,46 @@
 </head>
 <body class="dx-surface">
     <div role="main">
-        <h1 style="position: fixed; left: 0; top: 0; clip: rect(1px, 1px, 1px, 1px);">DataGrid Tooling API</h1>
+        <h1 style="position: fixed; left: 0; top: 0; clip: rect(1px, 1px, 1px, 1px);">DataGrid State API</h1>
 
         <select id="theme-selector" style="display: block;"></select>
         <br />
+
+        <!-- Hybrid-actions banner -->
+        <div id="limitations-banner">
+            <h3>ℹ️ Hybrid actions</h3>
+            <p>Most actions work <strong>exclusively</strong> through <code>grid.state(newState)</code>.
+               A few actions require a <strong>hybrid approach</strong> — either reading runtime information
+               before writing through state, or bypassing state entirely:</p>
+            <ul>
+                <li>
+                    <strong><code>selectByIndexes</code></strong> —
+                    <code>state()</code> stores <code>selectedRowKeys</code> (by key), not by visible row index.
+                    <em>Workaround:</em> <strong>read</strong> <code>grid.getVisibleRows()</code> to resolve indexes → keys,
+                    then <strong>write</strong> those keys into <code>state.selectedRowKeys</code>.
+                </li>
+                <li>
+                    <strong><code>selectAll</code></strong> —
+                    <code>state()</code> stores an explicit <code>selectedRowKeys</code> array; there is no
+                    state-only way to express "all rows selected".
+                    <em>Workaround:</em> <strong>read</strong> all records from the underlying store via
+                    <code>grid.getDataSource().store().load()</code>, extract every key, then <strong>write</strong>
+                    them into <code>state.selectedRowKeys</code>.
+                    For large remote data sets this loads the full data set to the client.
+                </li>
+                <li>
+                    <strong><code>summary</code> / <code>clearSummary</code></strong> —
+                    Summary configuration is <strong>not</strong> part of <code>grid.state()</code>.
+                    <em>Workaround:</em> <strong>read/write</strong> through <code>grid.option('summary', …)</code>.
+                    This is a full hybrid: both read and write bypass state.
+                </li>
+            </ul>
+            <p style="margin-top:6px; color:#555;">
+                No <code>option()</code>, <code>columnOption()</code>, or mutating imperative methods
+                (<code>selectRows</code>, <code>clearSorting</code>, etc.) are used anywhere
+                — except for the hybrid actions listed above.
+            </p>
+        </div>
 
         <!-- Top panel: grid + toolbar + log (sticky) -->
         <div id="top-panel">
@@ -161,9 +212,12 @@
     <script>
     /**
      * ====================================================================
-     *  DataGrid Tooling API  (transpiled from dataGridToolingApi.ts)
+     *  DataGrid State API  (transpiled from dataGridStateApi.ts)
      *
-     *  Authoritative TypeScript source:  ./dataGridToolingApi.ts
+     *  Authoritative TypeScript source:  ./dataGridStateApi.ts
+     *
+     *  All mutations go exclusively through grid.state(newState).
+     *  No option(), columnOption(), or imperative methods are used.
      * ====================================================================
      */
 
@@ -180,11 +234,10 @@
     function _success() { return { status: 'success' }; }
     function _failure(error) { return { status: 'failure', error: error }; }
     function _isActionName(name) { return ACTION_NAMES.includes(name); }
-    function _toPromise(v) { return Promise.resolve(v); }
 
-    // ── DataGridToolingApi class ─────────────────
+    // ── DataGridStateApi class ──────────────────
 
-    class DataGridToolingApi {
+    class DataGridStateApi {
         constructor(grid) {
             this._grid = grid;
             this._handlers = {
@@ -225,25 +278,48 @@
             }
         }
 
-        _colExists(df) { return this._grid.columnOption(df) !== undefined; }
-        _validateCol(df) {
-            if (!this._colExists(df)) return _failure('Column "' + df + '" does not exist.');
+        // ── State helpers ────────────────────────
+        _getState() { return this._grid.state(); }
+        _setState(s) { this._grid.state(s); }
+
+        // ── Column helpers ───────────────────────
+        _findColIdx(state, df) {
+            return (state.columns || []).findIndex(function(c) { return c.dataField === df; });
+        }
+        _validateCol(state, df) {
+            if (this._findColIdx(state, df) === -1) return _failure('Column "' + df + '" does not exist in state.');
             return null;
         }
 
-        // Wait for data reload to complete (critical for remote data sources).
-        // Returns null on success, or a failure ActionResult if refresh rejects.
+        // Wait for data reload after state change.
         async _waitForDataReady() {
-            try { await _toPromise(this._grid.refresh()); return null; }
+            try { await Promise.resolve(this._grid.refresh()); return null; }
             catch(e) { return _failure('Data refresh failed: ' + (e.message || e)); }
         }
 
+        // ── Sorting ─────────────────────────────
+
         async _sorting(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
+            var idx = this._findColIdx(state, p.dataField);
             var order = p.sortOrder === 'none' ? undefined : p.sortOrder;
-            this._grid.columnOption(p.dataField, 'sortOrder', order);
+
+            state.columns[idx].sortOrder = order;
+            if (order === undefined) {
+                state.columns[idx].sortIndex = undefined;
+            } else {
+                var maxIdx = (state.columns || [])
+                    .filter(function(c, i) { return i !== idx && c.sortOrder !== undefined && c.sortIndex !== undefined; })
+                    .reduce(function(m, c) { return Math.max(m, c.sortIndex); }, -1);
+                state.columns[idx].sortIndex = maxIdx + 1;
+            }
+
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var actual = this._grid.columnOption(p.dataField, 'sortOrder');
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].sortOrder;
             if (order === undefined && actual !== undefined)
                 return _failure('Sorting was not cleared for "' + p.dataField + '". Got: "' + actual + '".');
             if (order !== undefined && actual !== order)
@@ -252,20 +328,30 @@
         }
 
         async _clearSorting() {
-            this._grid.clearSorting();
+            var state = this._getState();
+            (state.columns || []).forEach(function(c) { c.sortOrder = undefined; c.sortIndex = undefined; });
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var cols = this._grid.getVisibleColumns();
-            var still = cols.filter(function(c) { return c.sortOrder !== undefined; });
+
+            var newState = this._getState();
+            var still = (newState.columns || []).filter(function(c) { return c.sortOrder !== undefined; });
             if (still.length > 0)
                 return _failure('clearSorting failed. Still sorted: ' + still.map(function(c){ return c.dataField; }).join(', '));
             return _success();
         }
 
+        // ── Filtering (per-column) ──────────────
+
         async _filtering(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
-            this._grid.columnOption(p.dataField, 'filterValue', p.filterValue);
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].filterValue = p.filterValue === null ? undefined : p.filterValue;
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var actual = this._grid.columnOption(p.dataField, 'filterValue');
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].filterValue;
             if (p.filterValue === null && actual !== undefined && actual !== null)
                 return _failure('Filter not cleared for "' + p.dataField + '". Got: "' + actual + '".');
             if (p.filterValue !== null && actual !== p.filterValue)
@@ -273,49 +359,84 @@
             return _success();
         }
 
+        // ── FilterValue (combined) ──────────────
+
         async _filterValue(p) {
-            this._grid.option('filterValue', p.expression);
+            var state = this._getState();
+            state.filterValue = p.expression;
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var actual = this._grid.option('filterValue');
+
+            var newState = this._getState();
+            var actual = newState.filterValue;
             if (p.expression === null) {
                 if (actual !== null && actual !== undefined)
                     return _failure('filterValue was not cleared. Got: ' + JSON.stringify(actual));
             } else {
                 if (actual === null || actual === undefined)
-                    return _failure('filterValue was not applied — grid returned null/undefined.');
+                    return _failure('filterValue was not applied — state returned null/undefined.');
             }
             return _success();
         }
 
+        // ── Clear Filter ────────────────────────
+
         async _clearFilter() {
-            this._grid.clearFilter();
+            var state = this._getState();
+            state.filterValue = undefined;
+            state.searchText = '';
+            (state.columns || []).forEach(function(c) {
+                c.filterValue = undefined;
+                c.filterValues = undefined;
+                c.filterType = undefined;
+                c.selectedFilterOperation = undefined;
+                c.bufferedFilterValue = undefined;
+                c.bufferedSelectedFilterOperation = undefined;
+            });
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
             var combined = this._grid.getCombinedFilter();
             if (combined !== undefined)
                 return _failure('clearFilter failed. Combined: ' + JSON.stringify(combined));
             return _success();
         }
 
+        // ── Searching ───────────────────────────
+
         async _searching(p) {
-            this._grid.searchByText(p.text);
+            var state = this._getState();
+            state.searchText = p.text;
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var actual = this._grid.option('searchPanel.text');
+
+            var newState = this._getState();
+            var actual = newState.searchText || '';
             if (actual !== p.text)
-                return _failure('Expected searchPanel.text "' + p.text + '", got "' + actual + '".');
+                return _failure('Expected searchText "' + p.text + '", got "' + actual + '".');
             return _success();
         }
 
+        // ── Grouping ────────────────────────────
+
         async _grouping(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
-            this._grid.columnOption(p.dataField, 'groupIndex', p.groupIndex);
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].groupIndex = p.groupIndex;
+            this._setState(state);
             var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
-            var actual = this._grid.columnOption(p.dataField, 'groupIndex');
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].groupIndex;
             if (p.groupIndex === undefined && actual !== undefined && actual !== -1)
                 return _failure('Grouping not cleared for "' + p.dataField + '". Got: ' + actual);
             if (p.groupIndex !== undefined && actual !== p.groupIndex)
                 return _failure('Expected groupIndex ' + p.groupIndex + ' for "' + p.dataField + '", got ' + actual);
             return _success();
         }
+
+        // ── Paging ──────────────────────────────
 
         async _pageIndex(p) {
             var idx = p.pageIndex;
@@ -324,9 +445,15 @@
             var count = this._grid.pageCount();
             if (count > 0 && idx >= count)
                 return _failure('pageIndex ' + idx + ' out of range. pageCount: ' + count);
-            await _toPromise(this._grid.pageIndex(idx));
-            var actual = this._grid.pageIndex();
-            if (actual !== idx) return _failure('Expected pageIndex ' + idx + ', got ' + actual);
+
+            var state = this._getState();
+            state.pageIndex = idx;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            if (newState.pageIndex !== idx)
+                return _failure('Expected pageIndex ' + idx + ', got ' + newState.pageIndex);
             return _success();
         }
 
@@ -334,112 +461,233 @@
             var size = p.pageSize;
             if (!Number.isInteger(size) || size <= 0)
                 return _failure('pageSize must be positive integer. Got: ' + size);
-            this._grid.pageSize(size);
-            var actual = this._grid.pageSize();
-            if (actual !== size) return _failure('Expected pageSize ' + size + ', got ' + actual);
+
+            var state = this._getState();
+            state.pageSize = size;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            if (newState.pageSize !== size)
+                return _failure('Expected pageSize ' + size + ', got ' + newState.pageSize);
             return _success();
         }
+
+        // ── Row Focusing ────────────────────────
 
         async _rowFocusing(p) {
             if (!this._grid.option('focusedRowEnabled'))
                 return _failure('focusedRowEnabled is not true. Enable it first.');
-            this._grid.option('focusedRowKey', p.key);
-            await _toPromise(this._grid.navigateToRow(p.key));
-            var actual = this._grid.option('focusedRowKey');
-            if (actual !== p.key)
-                return _failure('Expected focusedRowKey ' + JSON.stringify(p.key) + ', got ' + JSON.stringify(actual));
+
+            var state = this._getState();
+            state.focusedRowKey = p.key;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            // navigateToRow is a UI convenience to scroll the row into view.
+            await Promise.resolve(this._grid.navigateToRow(p.key));
+
+            var newState = this._getState();
+            if (newState.focusedRowKey !== p.key)
+                return _failure('Expected focusedRowKey ' + JSON.stringify(p.key) + ', got ' + JSON.stringify(newState.focusedRowKey));
             return _success();
         }
 
+        // ── Selection ───────────────────────────
+
         async _selectByKeys(p) {
-            await _toPromise(this._grid.selectRows(p.keys, p.preserve));
-            var selected = this._grid.getSelectedRowKeys();
-            var allPresent = p.keys.every(function(k) { return selected.indexOf(k) !== -1; });
+            var state = this._getState();
+            var newKeys;
+            if (p.preserve) {
+                var existing = state.selectedRowKeys || [];
+                var existingSet = {};
+                existing.forEach(function(k) { existingSet[JSON.stringify(k)] = true; });
+                newKeys = existing.slice();
+                p.keys.forEach(function(k) {
+                    if (!existingSet[JSON.stringify(k)]) newKeys.push(k);
+                });
+            } else {
+                newKeys = p.keys;
+            }
+            state.selectedRowKeys = newKeys;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            var selected = newState.selectedRowKeys || [];
+            var allPresent = p.keys.every(function(k) {
+                var kStr = JSON.stringify(k);
+                return selected.some(function(s) { return JSON.stringify(s) === kStr; });
+            });
             if (!allPresent)
                 return _failure('Not all keys selected. Requested: ' + JSON.stringify(p.keys) + ', actual: ' + JSON.stringify(selected));
             return _success();
         }
 
+        // Hybrid: READ grid.getVisibleRows() to resolve indexes → keys,
+        //         WRITE through state.selectedRowKeys.
         async _selectByIndexes(p) {
             var bad = p.indexes.find(function(i) { return !Number.isInteger(i) || i < 0; });
             if (bad !== undefined) return _failure('Invalid index: ' + bad);
-            await _toPromise(this._grid.selectRowsByIndexes(p.indexes));
-            var selected = this._grid.getSelectedRowKeys();
+
+            // Read-only bridge: resolve visible row indexes to keys
+            var visibleRows = this._grid.getVisibleRows();
+            var dataRows = visibleRows.filter(function(r) { return r.rowType === 'data'; });
+            var keys = [];
+
+            for (var i = 0; i < p.indexes.length; i++) {
+                var idx = p.indexes[i];
+                if (idx >= dataRows.length)
+                    return _failure('Row index ' + idx + ' out of range. Visible data row count: ' + dataRows.length);
+                keys.push(dataRows[idx].key);
+            }
+
+            // Mutate via state
+            var state = this._getState();
+            state.selectedRowKeys = keys;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            var selected = newState.selectedRowKeys || [];
             if (selected.length === 0 && p.indexes.length > 0)
-                return _failure('selectRowsByIndexes resulted in empty selection.');
+                return _failure('selectByIndexes resulted in empty selection.');
             return _success();
         }
 
+        // Hybrid: READ all records from the store to collect every key,
+        //         WRITE through state.selectedRowKeys.
+        //         For large remote data sets this loads the full data set.
         async _selectAll() {
-            await _toPromise(this._grid.selectAll());
-            var selected = this._grid.getSelectedRowKeys();
+            var dataSource = this._grid.getDataSource();
+            if (!dataSource)
+                return _failure('No data source available.');
+
+            var store = dataSource.store();
+            var grid = this._grid;
+
+            // Load every record from the store
+            var allItems = await Promise.resolve(store.load());
+
+            if (!Array.isArray(allItems))
+                return _failure('selectAll: store.load() returned non-array result.');
+
+            // Use grid.keyOf() to extract keys — handles simple and composite keys
+            var allKeys = allItems.map(function(item) { return grid.keyOf(item); });
+
+            var state = this._getState();
+            state.selectedRowKeys = allKeys;
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            var selected = newState.selectedRowKeys || [];
             var total = this._grid.totalCount();
-            if (total > 0 && selected.length === 0) return _failure('selectAll resulted in empty selection.');
+            if (total > 0 && selected.length === 0)
+                return _failure('selectAll resulted in empty selection.');
             return _success();
         }
 
         async _deselectAll() {
-            await _toPromise(this._grid.deselectAll());
-            var selected = this._grid.getSelectedRowKeys();
+            var state = this._getState();
+            state.selectedRowKeys = [];
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            var selected = newState.selectedRowKeys || [];
             if (selected.length !== 0) return _failure('deselectAll failed. Still selected: ' + selected.length);
             return _success();
         }
 
         async _clearSelection() {
-            this._grid.clearSelection();
-            var selected = this._grid.getSelectedRowKeys();
+            var state = this._getState();
+            state.selectedRowKeys = [];
+            this._setState(state);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+
+            var newState = this._getState();
+            var selected = newState.selectedRowKeys || [];
             if (selected.length !== 0) return _failure('clearSelection failed. Still selected: ' + selected.length);
             return _success();
         }
 
+        // ── Columns: visibility ─────────────────
+
         async _columnsVisibility(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
-            this._grid.columnOption(p.dataField, 'visible', p.visible);
-            var actual = this._grid.columnOption(p.dataField, 'visible');
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].visible = p.visible;
+            this._setState(state);
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].visible;
             if (actual !== p.visible)
                 return _failure('Expected visible=' + p.visible + ' for "' + p.dataField + '", got ' + actual);
             return _success();
         }
 
+        // ── Columns: reorder ────────────────────
+
         async _columnsReorder(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
             if (!Number.isInteger(p.visibleIndex) || p.visibleIndex < 0)
                 return _failure('visibleIndex must be non-negative integer. Got: ' + p.visibleIndex);
-            this._grid.columnOption(p.dataField, 'visibleIndex', p.visibleIndex);
-            var actual = this._grid.columnOption(p.dataField, 'visibleIndex');
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].visibleIndex = p.visibleIndex;
+            this._setState(state);
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].visibleIndex;
             if (actual !== p.visibleIndex)
                 return _failure('Expected visibleIndex ' + p.visibleIndex + ' for "' + p.dataField + '", got ' + actual);
             return _success();
         }
 
+        // ── Columns: pinning ────────────────────
+
         async _columnsPinning(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
-            this._grid.columnOption(p.dataField, {
-                fixed: p.fixed,
-                fixedPosition: p.fixed ? (p.fixedPosition || 'left') : undefined
-            });
-            var actualFixed = this._grid.columnOption(p.dataField, 'fixed');
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].fixed = p.fixed;
+            state.columns[idx].fixedPosition = p.fixed ? (p.fixedPosition || 'left') : undefined;
+            this._setState(state);
+
+            var newState = this._getState();
+            var actualFixed = newState.columns[idx].fixed;
             if (actualFixed !== p.fixed)
                 return _failure('Expected fixed=' + p.fixed + ' for "' + p.dataField + '", got ' + actualFixed);
             if (p.fixed) {
                 var expectedPos = p.fixedPosition || 'left';
-                var actualPos = this._grid.columnOption(p.dataField, 'fixedPosition');
+                var actualPos = newState.columns[idx].fixedPosition;
                 if (actualPos !== expectedPos)
                     return _failure('Expected fixedPosition "' + expectedPos + '" for "' + p.dataField + '", got "' + actualPos + '".');
             }
             return _success();
         }
 
+        // ── Columns: resize ─────────────────────
+
         async _columnsResize(p) {
-            var err = this._validateCol(p.dataField); if (err) return err;
+            var state = this._getState();
+            var err = this._validateCol(state, p.dataField); if (err) return err;
             if (typeof p.width === 'number' && p.width <= 0)
                 return _failure('width must be positive. Got: ' + p.width);
-            this._grid.columnOption(p.dataField, 'width', p.width);
-            var actual = this._grid.columnOption(p.dataField, 'width');
+            var idx = this._findColIdx(state, p.dataField);
+            state.columns[idx].width = p.width;
+            this._setState(state);
+
+            var newState = this._getState();
+            var actual = newState.columns[idx].width;
             if (actual !== p.width)
                 return _failure('Expected width ' + p.width + ' for "' + p.dataField + '", got ' + actual);
             return _success();
         }
+
+        // ── Summary (hybrid — uses grid.option()) ──
 
         async _summary(p) {
             if (p.totalItems === undefined && p.groupItems === undefined)
@@ -489,35 +737,35 @@
           action: 'sorting',
           args: { dataField: 'LastName', sortOrder: 'asc' },
           expect: 'success',
-          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "asc" }\nExpect: LastName column sorted ascending' },
+          tip: 'Action: sorting (via state)\nMutates: state.columns[].sortOrder, sortIndex\nArgs: { dataField: "LastName", sortOrder: "asc" }\nExpect: LastName column sorted ascending' },
 
         { section: 'Sorting',
           label: 'Sort LastName DESC',
           action: 'sorting',
           args: { dataField: 'LastName', sortOrder: 'desc' },
           expect: 'success',
-          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "desc" }\nExpect: LastName column sorted descending' },
+          tip: 'Action: sorting (via state)\nMutates: state.columns[].sortOrder, sortIndex\nArgs: { dataField: "LastName", sortOrder: "desc" }\nExpect: LastName column sorted descending' },
 
         { section: 'Sorting',
           label: 'Remove Sort from LastName',
           action: 'sorting',
           args: { dataField: 'LastName', sortOrder: 'none' },
           expect: 'success',
-          tip: 'Action: sorting\nArgs: { dataField: "LastName", sortOrder: "none" }\nExpect: Sorting cleared on LastName column' },
+          tip: 'Action: sorting (via state)\nMutates: state.columns[].sortOrder → undefined\nArgs: { dataField: "LastName", sortOrder: "none" }\nExpect: Sorting cleared on LastName column' },
 
         { section: 'Sorting',
           label: '⛔ Sort Non-Existent Column',
           action: 'sorting',
           args: { dataField: 'NoSuchField', sortOrder: 'asc' },
           expect: 'failure',
-          tip: 'Action: sorting\nArgs: { dataField: "NoSuchField", sortOrder: "asc" }\nExpect: FAILURE — column does not exist' },
+          tip: 'Action: sorting (via state)\nArgs: { dataField: "NoSuchField", sortOrder: "asc" }\nExpect: FAILURE — column does not exist in state' },
 
         { section: 'Sorting',
           label: 'Clear All Sorting',
           action: 'clearSorting',
           args: {},
           expect: 'success',
-          tip: 'Action: clearSorting\nArgs: {} (none)\nExpect: All column sort orders removed' },
+          tip: 'Action: clearSorting (via state)\nMutates: all columns sortOrder/sortIndex → undefined\nArgs: {} (none)\nExpect: All column sort orders removed' },
 
         // ── 2. Filtering (per-column) ───────────
         { section: 'Filtering (per-column)',
@@ -525,14 +773,14 @@
           action: 'filtering',
           args: { dataField: 'City', filterValue: 'Boise' },
           expect: 'success',
-          tip: 'Action: filtering\nArgs: { dataField: "City", filterValue: "Boise" }\nExpect: Only rows with City "Boise" shown' },
+          tip: 'Action: filtering (via state)\nMutates: state.columns[].filterValue\nArgs: { dataField: "City", filterValue: "Boise" }\nExpect: Only rows with City "Boise" shown' },
 
         { section: 'Filtering (per-column)',
           label: 'Clear Filter on City',
           action: 'filtering',
           args: { dataField: 'City', filterValue: null },
           expect: 'success',
-          tip: 'Action: filtering\nArgs: { dataField: "City", filterValue: null }\nExpect: City column filter cleared, all rows shown' },
+          tip: 'Action: filtering (via state)\nMutates: state.columns[].filterValue → undefined\nArgs: { dataField: "City", filterValue: null }\nExpect: City column filter cleared, all rows shown' },
 
         // ── 3. FilterValue (combined expression) ─
         { section: 'FilterValue (combined)',
@@ -540,14 +788,14 @@
           action: 'filterValue',
           args: { expression: ['State', '=', 'California'] },
           expect: 'success',
-          tip: 'Action: filterValue\nArgs: { expression: ["State", "=", "California"] }\nExpect: Top-level filterValue set; only California rows shown' },
+          tip: 'Action: filterValue (via state)\nMutates: state.filterValue\nArgs: { expression: ["State", "=", "California"] }\nExpect: Top-level filterValue set; only California rows shown' },
 
         { section: 'FilterValue (combined)',
           label: 'Clear filterValue',
           action: 'filterValue',
           args: { expression: null },
           expect: 'success',
-          tip: 'Action: filterValue\nArgs: { expression: null }\nExpect: Top-level filterValue removed, all rows shown' },
+          tip: 'Action: filterValue (via state)\nMutates: state.filterValue → null\nArgs: { expression: null }\nExpect: Top-level filterValue removed, all rows shown' },
 
         // ── 4. Clear Filter ─────────────────────
         { section: 'Clear Filter',
@@ -555,7 +803,7 @@
           action: '_sequence_clearFilter',
           args: {},
           expect: 'success',
-          tip: 'Sequence:\n1. filtering { dataField: "City", filterValue: "Boise" }\n2. clearFilter {}\nExpect: All filters removed (column + combined)' },
+          tip: 'Sequence (both via state):\n1. filtering { dataField: "City", filterValue: "Boise" }\n2. clearFilter {}\nMutates: filterValue, columns[].filterValue, searchText\nExpect: All filters removed' },
 
         // ── 5. Searching ────────────────────────
         { section: 'Searching',
@@ -563,14 +811,14 @@
           action: 'searching',
           args: { text: 'Carter' },
           expect: 'success',
-          tip: 'Action: searching\nArgs: { text: "Carter" }\nExpect: Search panel set to "Carter", grid filtered to matching rows' },
+          tip: 'Action: searching (via state)\nMutates: state.searchText\nArgs: { text: "Carter" }\nExpect: Search set to "Carter", grid filtered to matching rows' },
 
         { section: 'Searching',
           label: 'Clear Search',
           action: 'searching',
           args: { text: '' },
           expect: 'success',
-          tip: 'Action: searching\nArgs: { text: "" }\nExpect: Search cleared, all rows shown' },
+          tip: 'Action: searching (via state)\nMutates: state.searchText → ""\nArgs: { text: "" }\nExpect: Search cleared, all rows shown' },
 
         // ── 6. Grouping ─────────────────────────
         { section: 'Grouping',
@@ -578,14 +826,14 @@
           action: 'grouping',
           args: { dataField: 'State', groupIndex: 0 },
           expect: 'success',
-          tip: 'Action: grouping\nArgs: { dataField: "State", groupIndex: 0 }\nExpect: Rows grouped by State at first group level' },
+          tip: 'Action: grouping (via state)\nMutates: state.columns[].groupIndex\nArgs: { dataField: "State", groupIndex: 0 }\nExpect: Rows grouped by State at first group level' },
 
         { section: 'Grouping',
           label: 'Ungroup State',
           action: 'grouping',
           args: { dataField: 'State', groupIndex: undefined },
           expect: 'success',
-          tip: 'Action: grouping\nArgs: { dataField: "State", groupIndex: undefined }\nExpect: State grouping removed' },
+          tip: 'Action: grouping (via state)\nMutates: state.columns[].groupIndex → undefined\nArgs: { dataField: "State", groupIndex: undefined }\nExpect: State grouping removed' },
 
         // ── 7. Paging ───────────────────────────
         { section: 'Paging',
@@ -593,42 +841,42 @@
           action: 'pageSize',
           args: { pageSize: 10 },
           expect: 'success',
-          tip: 'Action: pageSize\nArgs: { pageSize: 10 }\nExpect: Grid shows 10 rows per page' },
+          tip: 'Action: pageSize (via state)\nMutates: state.pageSize\nArgs: { pageSize: 10 }\nExpect: Grid shows 10 rows per page' },
 
         { section: 'Paging',
           label: 'Set Page Size to 5',
           action: 'pageSize',
           args: { pageSize: 5 },
           expect: 'success',
-          tip: 'Action: pageSize\nArgs: { pageSize: 5 }\nExpect: Grid shows 5 rows per page' },
+          tip: 'Action: pageSize (via state)\nMutates: state.pageSize\nArgs: { pageSize: 5 }\nExpect: Grid shows 5 rows per page' },
 
         { section: 'Paging',
           label: 'Go to Page 2 (index 1)',
           action: 'pageIndex',
           args: { pageIndex: 1 },
           expect: 'success',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 1 }\nExpect: Grid navigates to second page (0-based index)' },
+          tip: 'Action: pageIndex (via state)\nMutates: state.pageIndex\nArgs: { pageIndex: 1 }\nExpect: Grid navigates to second page (0-based index)' },
 
         { section: 'Paging',
           label: 'Go to Page 1 (index 0)',
           action: 'pageIndex',
           args: { pageIndex: 0 },
           expect: 'success',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 0 }\nExpect: Grid returns to first page' },
+          tip: 'Action: pageIndex (via state)\nMutates: state.pageIndex\nArgs: { pageIndex: 0 }\nExpect: Grid returns to first page' },
 
         { section: 'Paging',
           label: '⛔ Page Index Out of Range',
           action: 'pageIndex',
           args: { pageIndex: 999 },
           expect: 'failure',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 999 }\nExpect: FAILURE — index exceeds page count' },
+          tip: 'Action: pageIndex (via state)\nArgs: { pageIndex: 999 }\nExpect: FAILURE — index exceeds page count' },
 
         { section: 'Paging',
           label: '⛔ Negative Page Size',
           action: 'pageSize',
           args: { pageSize: -1 },
           expect: 'failure',
-          tip: 'Action: pageSize\nArgs: { pageSize: -1 }\nExpect: FAILURE — pageSize must be a positive integer' },
+          tip: 'Action: pageSize (via state)\nArgs: { pageSize: -1 }\nExpect: FAILURE — pageSize must be a positive integer' },
 
         // ── 8. Row Focusing ─────────────────────
         { section: 'Row Focusing',
@@ -636,14 +884,14 @@
           action: 'rowFocusing',
           args: { key: 3 },
           expect: 'success',
-          tip: 'Action: rowFocusing\nArgs: { key: 3 }\nExpect: Row with ID 3 (Robert Reagan) focused and scrolled into view' },
+          tip: 'Action: rowFocusing (via state)\nMutates: state.focusedRowKey\nArgs: { key: 3 }\nExpect: Row with ID 3 (Robert Reagan) focused and scrolled into view' },
 
         { section: 'Row Focusing',
           label: 'Focus Row Key = 7',
           action: 'rowFocusing',
           args: { key: 7 },
           expect: 'success',
-          tip: 'Action: rowFocusing\nArgs: { key: 7 }\nExpect: Row with ID 7 (Kevin Carter) focused and scrolled into view' },
+          tip: 'Action: rowFocusing (via state)\nMutates: state.focusedRowKey\nArgs: { key: 7 }\nExpect: Row with ID 7 (Kevin Carter) focused and scrolled into view' },
 
         // ── 9. Selection ────────────────────────
         { section: 'Selection',
@@ -651,42 +899,42 @@
           action: 'selectByKeys',
           args: { keys: [1, 4, 6], preserve: false },
           expect: 'success',
-          tip: 'Action: selectByKeys\nArgs: { keys: [1, 4, 6], preserve: false }\nExpect: Rows 1, 4, 6 selected; previous selection replaced' },
+          tip: 'Action: selectByKeys (via state)\nMutates: state.selectedRowKeys\nArgs: { keys: [1, 4, 6], preserve: false }\nExpect: Rows 1, 4, 6 selected; previous selection replaced' },
 
         { section: 'Selection',
           label: 'Select Key [8] (preserve)',
           action: 'selectByKeys',
           args: { keys: [8], preserve: true },
           expect: 'success',
-          tip: 'Action: selectByKeys\nArgs: { keys: [8], preserve: true }\nExpect: Row 8 added to existing selection' },
+          tip: 'Action: selectByKeys (via state)\nMutates: state.selectedRowKeys (merged)\nArgs: { keys: [8], preserve: true }\nExpect: Row 8 added to existing selection' },
 
-        { section: 'Selection',
+        { section: 'Selection (hybrid)',
           label: 'Select by Indexes [0, 2]',
           action: 'selectByIndexes',
           args: { indexes: [0, 2] },
           expect: 'success',
-          tip: 'Action: selectByIndexes\nArgs: { indexes: [0, 2] }\nExpect: Visible rows at positions 0 and 2 selected' },
+          tip: 'Action: selectByIndexes (hybrid)\nReads: grid.getVisibleRows() → resolve indexes to keys\nMutates: state.selectedRowKeys\nArgs: { indexes: [0, 2] }\nExpect: Visible rows at positions 0 and 2 selected' },
 
-        { section: 'Selection',
+        { section: 'Selection (hybrid)',
           label: 'Select All',
           action: 'selectAll',
           args: {},
           expect: 'success',
-          tip: 'Action: selectAll\nArgs: {} (none)\nExpect: All rows across all pages selected' },
+          tip: 'Action: selectAll (hybrid)\nReads: grid.getDataSource().store().load() → all keys\nMutates: state.selectedRowKeys\nArgs: {} (none)\nExpect: All rows across all pages selected' },
 
         { section: 'Selection',
           label: 'Deselect All',
           action: 'deselectAll',
           args: {},
           expect: 'success',
-          tip: 'Action: deselectAll\nArgs: {} (none)\nExpect: All rows deselected' },
+          tip: 'Action: deselectAll (via state)\nMutates: state.selectedRowKeys → []\nArgs: {} (none)\nExpect: All rows deselected' },
 
         { section: 'Selection',
           label: 'Clear Selection',
           action: 'clearSelection',
           args: {},
           expect: 'success',
-          tip: 'Action: clearSelection\nArgs: {} (none)\nExpect: Selection cleared completely' },
+          tip: 'Action: clearSelection (via state)\nMutates: state.selectedRowKeys → []\nArgs: {} (none)\nExpect: Selection cleared completely' },
 
         // ── 10. Columns — Visibility ────────────
         { section: 'Columns — Visibility',
@@ -694,21 +942,21 @@
           action: 'columnsVisibility',
           args: { dataField: 'HireDate', visible: false },
           expect: 'success',
-          tip: 'Action: columnsVisibility\nArgs: { dataField: "HireDate", visible: false }\nExpect: HireDate column hidden from grid' },
+          tip: 'Action: columnsVisibility (via state)\nMutates: state.columns[].visible\nArgs: { dataField: "HireDate", visible: false }\nExpect: HireDate column hidden from grid' },
 
         { section: 'Columns — Visibility',
           label: 'Show "HireDate"',
           action: 'columnsVisibility',
           args: { dataField: 'HireDate', visible: true },
           expect: 'success',
-          tip: 'Action: columnsVisibility\nArgs: { dataField: "HireDate", visible: true }\nExpect: HireDate column visible again' },
+          tip: 'Action: columnsVisibility (via state)\nMutates: state.columns[].visible\nArgs: { dataField: "HireDate", visible: true }\nExpect: HireDate column visible again' },
 
         { section: 'Columns — Visibility',
           label: '⛔ Hide Non-Existent Column',
           action: 'columnsVisibility',
           args: { dataField: 'Nope', visible: false },
           expect: 'failure',
-          tip: 'Action: columnsVisibility\nArgs: { dataField: "Nope", visible: false }\nExpect: FAILURE — column "Nope" does not exist' },
+          tip: 'Action: columnsVisibility (via state)\nArgs: { dataField: "Nope", visible: false }\nExpect: FAILURE — column "Nope" does not exist in state' },
 
         // ── 11. Columns — Reordering ────────────
         { section: 'Columns — Reordering',
@@ -716,14 +964,14 @@
           action: 'columnsReorder',
           args: { dataField: 'Position', visibleIndex: 0 },
           expect: 'success',
-          tip: 'Action: columnsReorder\nArgs: { dataField: "Position", visibleIndex: 0 }\nExpect: Position column becomes first visible column' },
+          tip: 'Action: columnsReorder (via state)\nMutates: state.columns[].visibleIndex\nArgs: { dataField: "Position", visibleIndex: 0 }\nExpect: Position column becomes first visible column' },
 
         { section: 'Columns — Reordering',
           label: 'Move "Position" back to Index 3',
           action: 'columnsReorder',
           args: { dataField: 'Position', visibleIndex: 3 },
           expect: 'success',
-          tip: 'Action: columnsReorder\nArgs: { dataField: "Position", visibleIndex: 3 }\nExpect: Position column returns to 4th position' },
+          tip: 'Action: columnsReorder (via state)\nMutates: state.columns[].visibleIndex\nArgs: { dataField: "Position", visibleIndex: 3 }\nExpect: Position column returns to 4th position' },
 
         // ── 12. Columns — Pinning ───────────────
         { section: 'Columns — Pinning',
@@ -731,28 +979,28 @@
           action: 'columnsPinning',
           args: { dataField: 'FirstName', fixed: true, fixedPosition: 'left' },
           expect: 'success',
-          tip: 'Action: columnsPinning\nArgs: { dataField: "FirstName", fixed: true, fixedPosition: "left" }\nExpect: FirstName pinned to left edge' },
+          tip: 'Action: columnsPinning (via state)\nMutates: state.columns[].fixed, fixedPosition\nArgs: { dataField: "FirstName", fixed: true, fixedPosition: "left" }\nExpect: FirstName pinned to left edge' },
 
         { section: 'Columns — Pinning',
           label: 'Pin "LastName" to Right',
           action: 'columnsPinning',
           args: { dataField: 'LastName', fixed: true, fixedPosition: 'right' },
           expect: 'success',
-          tip: 'Action: columnsPinning\nArgs: { dataField: "LastName", fixed: true, fixedPosition: "right" }\nExpect: LastName pinned to right edge' },
+          tip: 'Action: columnsPinning (via state)\nMutates: state.columns[].fixed, fixedPosition\nArgs: { dataField: "LastName", fixed: true, fixedPosition: "right" }\nExpect: LastName pinned to right edge' },
 
         { section: 'Columns — Pinning',
           label: 'Unpin "FirstName"',
           action: 'columnsPinning',
           args: { dataField: 'FirstName', fixed: false },
           expect: 'success',
-          tip: 'Action: columnsPinning\nArgs: { dataField: "FirstName", fixed: false }\nExpect: FirstName unfixed, scrolls normally' },
+          tip: 'Action: columnsPinning (via state)\nMutates: state.columns[].fixed → false\nArgs: { dataField: "FirstName", fixed: false }\nExpect: FirstName unfixed, scrolls normally' },
 
         { section: 'Columns — Pinning',
           label: 'Unpin "LastName"',
           action: 'columnsPinning',
           args: { dataField: 'LastName', fixed: false },
           expect: 'success',
-          tip: 'Action: columnsPinning\nArgs: { dataField: "LastName", fixed: false }\nExpect: LastName unfixed, scrolls normally' },
+          tip: 'Action: columnsPinning (via state)\nMutates: state.columns[].fixed → false\nArgs: { dataField: "LastName", fixed: false }\nExpect: LastName unfixed, scrolls normally' },
 
         // ── 13. Columns — Resizing ──────────────
         { section: 'Columns — Resizing',
@@ -760,31 +1008,31 @@
           action: 'columnsResize',
           args: { dataField: 'FirstName', width: 200 },
           expect: 'success',
-          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: 200 }\nExpect: FirstName column width set to 200px' },
+          tip: 'Action: columnsResize (via state)\nMutates: state.columns[].width\nArgs: { dataField: "FirstName", width: 200 }\nExpect: FirstName column width set to 200px' },
 
         { section: 'Columns — Resizing',
           label: 'Resize "FirstName" to "30%"',
           action: 'columnsResize',
           args: { dataField: 'FirstName', width: '30%' },
           expect: 'success',
-          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: "30%" }\nExpect: FirstName column width set to 30% of grid' },
+          tip: 'Action: columnsResize (via state)\nMutates: state.columns[].width\nArgs: { dataField: "FirstName", width: "30%" }\nExpect: FirstName column width set to 30% of grid' },
 
         { section: 'Columns — Resizing',
           label: '⛔ Negative Width',
           action: 'columnsResize',
           args: { dataField: 'FirstName', width: -50 },
           expect: 'failure',
-          tip: 'Action: columnsResize\nArgs: { dataField: "FirstName", width: -50 }\nExpect: FAILURE — width must be positive' },
+          tip: 'Action: columnsResize (via state)\nArgs: { dataField: "FirstName", width: -50 }\nExpect: FAILURE — width must be positive' },
 
-        // ── 14. Summary (Aggregation) ─────────────
-        { section: 'Summary (Aggregation)',
+        // ── 14. Summary (Aggregation) — hybrid ────
+        { section: 'Summary (Aggregation) — hybrid',
           label: 'Add Total: Count of ID',
           action: 'summary',
           args: { totalItems: [{ column: 'ID', summaryType: 'count' }] },
           expect: 'success',
-          tip: 'Action: summary\nArgs: { totalItems: [{ column: "ID", summaryType: "count" }] }\nExpect: Footer shows Count of ID' },
+          tip: 'Action: summary (hybrid — grid.option)\nWrites: grid.option("summary", …)\nArgs: { totalItems: [{ column: "ID", summaryType: "count" }] }\nExpect: Footer shows Count of ID' },
 
-        { section: 'Summary (Aggregation)',
+        { section: 'Summary (Aggregation) — hybrid',
           label: 'Add Total: Count + Min HireDate',
           action: 'summary',
           args: { totalItems: [
@@ -792,28 +1040,28 @@
               { column: 'HireDate', summaryType: 'min', valueFormat: 'shortDate' },
           ] },
           expect: 'success',
-          tip: 'Action: summary\nArgs: { totalItems: [count of ID, min of HireDate] }\nExpect: Footer shows Count and Min HireDate' },
+          tip: 'Action: summary (hybrid — grid.option)\nWrites: grid.option("summary", …)\nArgs: { totalItems: [count of ID, min of HireDate] }\nExpect: Footer shows Count and Min HireDate' },
 
-        { section: 'Summary (Aggregation)',
+        { section: 'Summary (Aggregation) — hybrid',
           label: 'Add Group Summary: Count',
           action: 'summary',
           args: { groupItems: [{ column: 'ID', summaryType: 'count', displayFormat: '{0} items' }] },
           expect: 'success',
-          tip: 'Action: summary\nArgs: { groupItems: [{ column: "ID", summaryType: "count" }] }\nExpect: Group rows show item count (group by a column first)' },
+          tip: 'Action: summary (hybrid — grid.option)\nWrites: grid.option("summary", …)\nArgs: { groupItems: [{ column: "ID", summaryType: "count" }] }\nExpect: Group rows show item count (group by a column first)' },
 
-        { section: 'Summary (Aggregation)',
+        { section: 'Summary (Aggregation) — hybrid',
           label: '⛔ Empty Payload',
           action: 'summary',
           args: {},
           expect: 'failure',
-          tip: 'Action: summary\nArgs: {} (no totalItems or groupItems)\nExpect: FAILURE — must include at least one of totalItems or groupItems' },
+          tip: 'Action: summary (hybrid — grid.option)\nArgs: {} (no totalItems or groupItems)\nExpect: FAILURE — must include at least one of totalItems or groupItems' },
 
-        { section: 'Summary (Aggregation)',
+        { section: 'Summary (Aggregation) — hybrid',
           label: 'Clear Summary',
           action: 'clearSummary',
           args: {},
           expect: 'success',
-          tip: 'Action: clearSummary\nArgs: {} (none)\nExpect: All summary items removed from footer and group rows' },
+          tip: 'Action: clearSummary (hybrid — grid.option)\nWrites: grid.option("summary", { totalItems: [], groupItems: [] })\nArgs: {} (none)\nExpect: All summary items removed from footer and group rows' },
 
         // ── 15. Validation ──────────────────────
         { section: 'Validation',
@@ -932,7 +1180,7 @@
             }
 
             var grid = $container.dxDataGrid(opts).dxDataGrid('instance');
-            api = new DataGridToolingApi(grid);
+            api = new DataGridStateApi(grid);
         }
 
         createGrid();
@@ -1033,7 +1281,6 @@
             value: false,
             switchedOnText: 'Remote',
             switchedOffText: 'Local',
-            // width: 90,
             onValueChanged: function(e) {
                 isRemote = e.value;
                 updateBadge();
