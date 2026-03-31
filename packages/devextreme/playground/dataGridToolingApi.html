@@ -171,7 +171,7 @@
 
     const ACTION_NAMES = Object.freeze([
         'sorting', 'clearSorting', 'filtering', 'filterValue', 'clearFilter',
-        'searching', 'grouping', 'pageIndex', 'pageSize', 'rowFocusing',
+        'searching', 'grouping', 'page', 'pageSize', 'rowFocusing',
         'selectByKeys', 'selectByIndexes', 'selectAll', 'deselectAll', 'clearSelection',
         'columnsVisibility', 'columnsReorder', 'columnsPinning', 'columnsResize',
         'summary', 'clearSummary',
@@ -195,7 +195,7 @@
                 clearFilter:       (p) => this._clearFilter(p),
                 searching:         (p) => this._searching(p),
                 grouping:          (p) => this._grouping(p),
-                pageIndex:         (p) => this._pageIndex(p),
+                page:              (p) => this._page(p),
                 pageSize:          (p) => this._pageSize(p),
                 rowFocusing:       (p) => this._rowFocusing(p),
                 selectByKeys:      (p) => this._selectByKeys(p),
@@ -317,16 +317,17 @@
             return _success();
         }
 
-        async _pageIndex(p) {
-            var idx = p.pageIndex;
-            if (!Number.isInteger(idx) || idx < 0)
-                return _failure('pageIndex must be non-negative integer. Got: ' + idx);
+        async _page(p) {
+            var page = p.page;
+            if (!Number.isInteger(page) || page < 1)
+                return _failure('Page must be a positive integer. Got: ' + page);
             var count = this._grid.pageCount();
-            if (count > 0 && idx >= count)
-                return _failure('pageIndex ' + idx + ' out of range. pageCount: ' + count);
+            if (count > 0 && page > count)
+                return _failure('Page ' + page + ' is out of range. Total pages: ' + count);
+            var idx = page - 1;
             await _toPromise(this._grid.pageIndex(idx));
             var actual = this._grid.pageIndex();
-            if (actual !== idx) return _failure('Expected pageIndex ' + idx + ', got ' + actual);
+            if (actual !== idx) return _failure('Expected page ' + page + ', got ' + (actual + 1));
             return _success();
         }
 
@@ -603,25 +604,25 @@
           tip: 'Action: pageSize\nArgs: { pageSize: 5 }\nExpect: Grid shows 5 rows per page' },
 
         { section: 'Paging',
-          label: 'Go to Page 2 (index 1)',
-          action: 'pageIndex',
-          args: { pageIndex: 1 },
+          label: 'Go to Page 2',
+          action: 'page',
+          args: { page: 2 },
           expect: 'success',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 1 }\nExpect: Grid navigates to second page (0-based index)' },
+          tip: 'Action: page\nArgs: { page: 2 }\nExpect: Grid navigates to second page' },
 
         { section: 'Paging',
-          label: 'Go to Page 1 (index 0)',
-          action: 'pageIndex',
-          args: { pageIndex: 0 },
+          label: 'Go to Page 1',
+          action: 'page',
+          args: { page: 1 },
           expect: 'success',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 0 }\nExpect: Grid returns to first page' },
+          tip: 'Action: page\nArgs: { page: 1 }\nExpect: Grid returns to first page' },
 
         { section: 'Paging',
-          label: '⛔ Page Index Out of Range',
-          action: 'pageIndex',
-          args: { pageIndex: 999 },
+          label: '⛔ Page Out of Range',
+          action: 'page',
+          args: { page: 999 },
           expect: 'failure',
-          tip: 'Action: pageIndex\nArgs: { pageIndex: 999 }\nExpect: FAILURE — index exceeds page count' },
+          tip: 'Action: page\nArgs: { page: 999 }\nExpect: FAILURE — page exceeds total page count' },
 
         { section: 'Paging',
           label: '⛔ Negative Page Size',

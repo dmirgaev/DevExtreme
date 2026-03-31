@@ -76,7 +76,7 @@
     <script>
     const ACTION_NAMES = Object.freeze([
         'sorting', 'clearSorting', 'filtering', 'filterValue', 'clearFilter',
-        'searching', 'grouping', 'pageIndex', 'pageSize', 'rowFocusing',
+        'searching', 'grouping', 'page', 'pageSize', 'rowFocusing',
         'selectByKeys', 'selectByIndexes', 'selectAll', 'deselectAll', 'clearSelection',
         'columnsVisibility', 'columnsReorder', 'columnsPinning', 'columnsResize',
         'summary', 'clearSummary', 'help',
@@ -90,7 +90,7 @@
         clearFilter:       'Remove all active filters (column-level, combined, and search)',
         searching:         'Set or clear the global search text',
         grouping:          'Group rows by a column or remove grouping',
-        pageIndex:         'Navigate to a specific page (0-based)',
+        page:              'Navigate to a specific page (1-based: page 1 is first)',
         pageSize:          'Change the number of rows per page',
         rowFocusing:       'Focus and scroll to a specific row by key',
         selectByKeys:      'Select rows by their key values',
@@ -122,7 +122,7 @@
                 clearFilter:       ()  => this._clearFilter(),
                 searching:         (p) => this._searching(p),
                 grouping:          (p) => this._grouping(p),
-                pageIndex:         (p) => this._pageIndex(p),
+                page:              (p) => this._page(p),
                 pageSize:          (p) => this._pageSize(p),
                 rowFocusing:       (p) => this._rowFocusing(p),
                 selectByKeys:      (p) => this._selectByKeys(p),
@@ -268,15 +268,16 @@
             return _success();
         }
 
-        async _pageIndex(p) {
-            const idx = p.pageIndex;
-            if (!Number.isInteger(idx) || idx < 0)
-                return _failure('Page index must be a non-negative integer.');
+        async _page(p) {
+            const page = p.page;
+            if (!Number.isInteger(page) || page < 1)
+                return _failure('Page must be a positive integer.');
 
             const count = this._grid.pageCount();
-            if (count > 0 && idx >= count)
-                return _failure(`Page ${idx} is out of range (${count} pages total).`);
+            if (count > 0 && page > count)
+                return _failure(`Page ${page} is out of range (${count} pages total).`);
 
+            const idx = page - 1;
             await Promise.resolve(this._grid.pageIndex(idx));
             if (this._grid.pageIndex() !== idx)
                 return _failure('Page navigation failed.');
@@ -470,7 +471,7 @@ Actions and payloads:
 5. clearFilter      — {}
 6. searching        — { "text": string }
 7. grouping         — { "dataField": string, "groupIndex": number|null }
-8. pageIndex        — { "pageIndex": number }
+8. page             — { "page": number } (1-based: page 1 is first)
 9. pageSize         — { "pageSize": number }
 10. rowFocusing     — { "key": number }
 11. selectByKeys    — { "keys": [number,...], "preserve": boolean }

@@ -46,7 +46,7 @@ export const ACTION_NAMES = [
   'clearFilter',
   'searching',
   'grouping',
-  'pageIndex',
+  'page',
   'pageSize',
   'rowFocusing',
   'selectByKeys',
@@ -95,8 +95,8 @@ export interface GroupingPayload {
   groupIndex: number | undefined;
 }
 
-export interface PageIndexPayload {
-  pageIndex: number;
+export interface PagePayload {
+  page: number;
 }
 
 export interface PageSizePayload {
@@ -177,7 +177,7 @@ export interface ActionPayloadMap<TKey = unknown> {
   clearFilter: ClearFilterPayload;
   searching: SearchingPayload;
   grouping: GroupingPayload;
-  pageIndex: PageIndexPayload;
+  page: PagePayload;
   pageSize: PageSizePayload;
   rowFocusing: RowFocusingPayload<TKey>;
   selectByKeys: SelectByKeysPayload<TKey>;
@@ -235,7 +235,7 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
       clearFilter: (p) => this.handleClearFilter(p),
       searching: (p) => this.handleSearching(p),
       grouping: (p) => this.handleGrouping(p),
-      pageIndex: (p) => this.handlePageIndex(p),
+      page: (p) => this.handlePage(p),
       pageSize: (p) => this.handlePageSize(p),
       rowFocusing: (p) => this.handleRowFocusing(p),
       selectByKeys: (p) => this.handleSelectByKeys(p),
@@ -457,23 +457,24 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   // -- Paging ------------------------------------
 
-  private async handlePageIndex(payload: PageIndexPayload): Promise<ActionResult> {
-    const { pageIndex: idx } = payload;
+  private async handlePage(payload: PagePayload): Promise<ActionResult> {
+    const { page } = payload;
 
-    if (!Number.isInteger(idx) || idx < 0) {
-      return failure(`pageIndex must be a non‑negative integer. Got: ${idx}.`);
+    if (!Number.isInteger(page) || page < 1) {
+      return failure(`Page must be a positive integer. Got: ${page}.`);
     }
 
     const pageCount = this.grid.pageCount();
-    if (pageCount > 0 && idx >= pageCount) {
-      return failure(`pageIndex ${idx} is out of range. Page count: ${pageCount}.`);
+    if (pageCount > 0 && page > pageCount) {
+      return failure(`Page ${page} is out of range. Total pages: ${pageCount}.`);
     }
 
+    const idx = page - 1;
     await toNativePromise(this.grid.pageIndex(idx));
 
     const actual = this.grid.pageIndex();
     if (actual !== idx) {
-      return failure(`Expected pageIndex ${idx}, got ${actual}.`);
+      return failure(`Expected page ${page}, got ${actual + 1}.`);
     }
 
     return success();
