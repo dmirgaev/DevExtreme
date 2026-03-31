@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>DataGrid AI Assistant — Tooling API</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <script type="text/javascript">
+        const currentThemeId = localStorage.getItem("currentThemeId") || "light";
+
+        const link = document.createElement("link");
+        link.href = `../artifacts/css/dx.${currentThemeId}.css`;
+        link.type = "text/css";
+        link.rel = "stylesheet";
+
+        document.getElementsByTagName("head")[0].appendChild(link);
+    </script>
+
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        .aiAssistantWrapper {
+            display: flex;
+            width: 100%;
+            margin-top: 1em;
+        }
+        #aiAssistantBtn { margin-left: auto; }
+
+        /* ── Chat overrides ── */
+        .dx-chat-messagegroup { display: block; }
+        .dx-chat-messagegroup-alignment-start { justify-items: unset; }
+        .dx-chat-messagebubble { width: 100%; position: relative; overflow: hidden; }
+
+        .assistant_btn {
+            display: block;
+            border-radius: 4px;
+            border-width: 1px;
+            border-style: solid;
+            border-color: #e0e0e0;
+            margin: 5px 0;
+            position: relative;
+            top: 2px;
+        }
+
+        /* ── Message status classes ── */
+        .message-container { display: flex; gap: 4px; }
+        .dx-pending .my-icon, .dx-pending .dx-chat-messagebubble-operation { color: #0F6CBD; }
+        .dx-success .my-icon, .dx-success .dx-chat-messagebubble-operation { color: #107C10; }
+        .dx-error   .my-icon, .dx-error   .dx-chat-messagebubble-operation { color: #C50F1F; }
+
+        /* ── Action results log ── */
+        .action-results {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: var(--dx-color-main-bg, #f5f5f5);
+            border-radius: 6px;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .action-result-item { display: flex; gap: 6px; align-items: baseline; }
+        .action-result-item.ok   { color: #107C10; }
+        .action-result-item.fail { color: #C50F1F; }
+        .action-result-item .action-name { font-weight: 600; }
+        .action-result-item .action-payload { opacity: 0.65; font-size: 11px; }
+        .action-result-item .action-error  { font-style: italic; }
+    </style>
+
+    <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
+    <script type="text/javascript" src="../artifacts/js/dx.all.debug.js" charset="utf-8"></script>
+    <script type="text/javascript" src="./themeSelector.js"></script>
+</head>
+<body class="dx-surface">
+    <div role="main">
+        <select id="theme-selector" style="display: block;"></select>
+        <br />
+
+        <div class="aiAssistantWrapper">
+            <div id="aiAssistantBtn"></div>
+            <div id="aiAssistant"></div>
+        </div>
+        <div id="gridContainer"></div>
+    </div>
+
+    <script>
+    /**
+     * ====================================================================
+     *  DataGrid Tooling API  (from dataGridToolingApi.ts)
+     * ====================================================================
+     */
+
+    const ACTION_NAMES = Object.freeze([
+        'sorting', 'clearSorting', 'filtering', 'filterValue', 'clearFilter',
+        'searching', 'grouping', 'pageIndex', 'pageSize', 'rowFocusing',
+        'selectByKeys', 'selectByIndexes', 'selectAll', 'deselectAll', 'clearSelection',
+        'columnsVisibility', 'columnsReorder', 'columnsPinning', 'columnsResize',
+        'summary', 'clearSummary',
+    ]);
+
+    function _success() { return { status: 'success' }; }
+    function _failure(error) { return { status: 'failure', error: error }; }
+    function _isActionName(name) { return ACTION_NAMES.includes(name); }
+    function _toPromise(v) { return Promise.resolve(v); }
+
+    class DataGridToolingApi {
+        constructor(grid) {
+            this._grid = grid;
+            this._handlers = {
+                sorting:           (p) => this._sorting(p),
+                clearSorting:      (p) => this._clearSorting(p),
+                filtering:         (p) => this._filtering(p),
+                filterValue:       (p) => this._filterValue(p),
+                clearFilter:       (p) => this._clearFilter(p),
+                searching:         (p) => this._searching(p),
+                grouping:          (p) => this._grouping(p),
+                pageIndex:         (p) => this._pageIndex(p),
+                pageSize:          (p) => this._pageSize(p),
+                rowFocusing:       (p) => this._rowFocusing(p),
+                selectByKeys:      (p) => this._selectByKeys(p),
+                selectByIndexes:   (p) => this._selectByIndexes(p),
+                selectAll:         (p) => this._selectAll(p),
+                deselectAll:       (p) => this._deselectAll(p),
+                clearSelection:    (p) => this._clearSelection(p),
+                columnsVisibility: (p) => this._columnsVisibility(p),
+                columnsReorder:    (p) => this._columnsReorder(p),
+                columnsPinning:    (p) => this._columnsPinning(p),
+                columnsResize:     (p) => this._columnsResize(p),
+                summary:           (p) => this._summary(p),
+                clearSummary:      (p) => this._clearSummary(p),
+            };
+        }
+
+        getAvailableActions() { return ACTION_NAMES; }
+
+        async action(name, payload) {
+            if (!_isActionName(name)) {
+                return _failure('Unknown action: "' + name + '". Available: ' + ACTION_NAMES.join(', '));
+            }
+            try {
+                return await this._handlers[name](payload);
+            } catch (e) {
+                return _failure('Action "' + name + '" threw: ' + (e.message || e));
+            }
+        }
+
+        _colExists(df) { return this._grid.columnOption(df) !== undefined; }
+        _validateCol(df) {
+            if (!this._colExists(df)) return _failure('Column "' + df + '" does not exist.');
+            return null;
+        }
+        async _waitForDataReady() {
+            try { await _toPromise(this._grid.refresh()); return null; }
+            catch(e) { return _failure('Data refresh failed: ' + (e.message || e)); }
+        }
+
+        async _sorting(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            var order = p.sortOrder === 'none' ? undefined : p.sortOrder;
+            this._grid.columnOption(p.dataField, 'sortOrder', order);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var actual = this._grid.columnOption(p.dataField, 'sortOrder');
+            if (order === undefined && actual !== undefined)
+                return _failure('Sorting was not cleared for "' + p.dataField + '". Got: "' + actual + '".');
+            if (order !== undefined && actual !== order)
+                return _failure('Expected sortOrder "' + order + '" for "' + p.dataField + '", got "' + actual + '".');
+            return _success();
+        }
+
+        async _clearSorting() {
+            this._grid.clearSorting();
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var cols = this._grid.getVisibleColumns();
+            var still = cols.filter(function(c) { return c.sortOrder !== undefined; });
+            if (still.length > 0)
+                return _failure('clearSorting failed. Still sorted: ' + still.map(function(c){ return c.dataField; }).join(', '));
+            return _success();
+        }
+
+        async _filtering(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            this._grid.columnOption(p.dataField, 'filterValue', p.filterValue);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var actual = this._grid.columnOption(p.dataField, 'filterValue');
+            if (p.filterValue === null && actual !== undefined && actual !== null)
+                return _failure('Filter not cleared for "' + p.dataField + '". Got: "' + actual + '".');
+            if (p.filterValue !== null && actual !== p.filterValue)
+                return _failure('Expected filterValue "' + p.filterValue + '" for "' + p.dataField + '", got "' + actual + '".');
+            return _success();
+        }
+
+        async _filterValue(p) {
+            this._grid.option('filterValue', p.expression);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var actual = this._grid.option('filterValue');
+            if (p.expression === null) {
+                if (actual !== null && actual !== undefined)
+                    return _failure('filterValue was not cleared. Got: ' + JSON.stringify(actual));
+            } else {
+                if (actual === null || actual === undefined)
+                    return _failure('filterValue was not applied — grid returned null/undefined.');
+            }
+            return _success();
+        }
+
+        async _clearFilter() {
+            this._grid.clearFilter();
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var combined = this._grid.getCombinedFilter();
+            if (combined !== undefined)
+                return _failure('clearFilter failed. Combined: ' + JSON.stringify(combined));
+            return _success();
+        }
+
+        async _searching(p) {
+            this._grid.searchByText(p.text);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var actual = this._grid.option('searchPanel.text');
+            if (actual !== p.text)
+                return _failure('Expected searchPanel.text "' + p.text + '", got "' + actual + '".');
+            return _success();
+        }
+
+        async _grouping(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            this._grid.columnOption(p.dataField, 'groupIndex', p.groupIndex);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var actual = this._grid.columnOption(p.dataField, 'groupIndex');
+            if (p.groupIndex === undefined && actual !== undefined && actual !== -1)
+                return _failure('Grouping not cleared for "' + p.dataField + '". Got: ' + actual);
+            if (p.groupIndex !== undefined && actual !== p.groupIndex)
+                return _failure('Expected groupIndex ' + p.groupIndex + ' for "' + p.dataField + '", got ' + actual);
+            return _success();
+        }
+
+        async _pageIndex(p) {
+            var idx = p.pageIndex;
+            if (!Number.isInteger(idx) || idx < 0)
+                return _failure('pageIndex must be non-negative integer. Got: ' + idx);
+            var count = this._grid.pageCount();
+            if (count > 0 && idx >= count)
+                return _failure('pageIndex ' + idx + ' out of range. pageCount: ' + count);
+            await _toPromise(this._grid.pageIndex(idx));
+            var actual = this._grid.pageIndex();
+            if (actual !== idx) return _failure('Expected pageIndex ' + idx + ', got ' + actual);
+            return _success();
+        }
+
+        async _pageSize(p) {
+            var size = p.pageSize;
+            if (!Number.isInteger(size) || size <= 0)
+                return _failure('pageSize must be positive integer. Got: ' + size);
+            this._grid.pageSize(size);
+            var actual = this._grid.pageSize();
+            if (actual !== size) return _failure('Expected pageSize ' + size + ', got ' + actual);
+            return _success();
+        }
+
+        async _rowFocusing(p) {
+            if (!this._grid.option('focusedRowEnabled'))
+                return _failure('focusedRowEnabled is not true. Enable it first.');
+            this._grid.option('focusedRowKey', p.key);
+            await _toPromise(this._grid.navigateToRow(p.key));
+            var actual = this._grid.option('focusedRowKey');
+            if (actual !== p.key)
+                return _failure('Expected focusedRowKey ' + JSON.stringify(p.key) + ', got ' + JSON.stringify(actual));
+            return _success();
+        }
+
+        async _selectByKeys(p) {
+            await _toPromise(this._grid.selectRows(p.keys, p.preserve));
+            var selected = this._grid.getSelectedRowKeys();
+            var allPresent = p.keys.every(function(k) { return selected.indexOf(k) !== -1; });
+            if (!allPresent)
+                return _failure('Not all keys selected. Requested: ' + JSON.stringify(p.keys) + ', actual: ' + JSON.stringify(selected));
+            return _success();
+        }
+
+        async _selectByIndexes(p) {
+            var bad = p.indexes.find(function(i) { return !Number.isInteger(i) || i < 0; });
+            if (bad !== undefined) return _failure('Invalid index: ' + bad);
+            await _toPromise(this._grid.selectRowsByIndexes(p.indexes));
+            var selected = this._grid.getSelectedRowKeys();
+            if (selected.length === 0 && p.indexes.length > 0)
+                return _failure('selectRowsByIndexes resulted in empty selection.');
+            return _success();
+        }
+
+        async _selectAll() {
+            await _toPromise(this._grid.selectAll());
+            var selected = this._grid.getSelectedRowKeys();
+            var total = this._grid.totalCount();
+            if (total > 0 && selected.length === 0) return _failure('selectAll resulted in empty selection.');
+            return _success();
+        }
+
+        async _deselectAll() {
+            await _toPromise(this._grid.deselectAll());
+            var selected = this._grid.getSelectedRowKeys();
+            if (selected.length !== 0) return _failure('deselectAll failed. Still selected: ' + selected.length);
+            return _success();
+        }
+
+        async _clearSelection() {
+            this._grid.clearSelection();
+            var selected = this._grid.getSelectedRowKeys();
+            if (selected.length !== 0) return _failure('clearSelection failed. Still selected: ' + selected.length);
+            return _success();
+        }
+
+        async _columnsVisibility(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            this._grid.columnOption(p.dataField, 'visible', p.visible);
+            var actual = this._grid.columnOption(p.dataField, 'visible');
+            if (actual !== p.visible)
+                return _failure('Expected visible=' + p.visible + ' for "' + p.dataField + '", got ' + actual);
+            return _success();
+        }
+
+        async _columnsReorder(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            if (!Number.isInteger(p.visibleIndex) || p.visibleIndex < 0)
+                return _failure('visibleIndex must be non-negative integer. Got: ' + p.visibleIndex);
+            this._grid.columnOption(p.dataField, 'visibleIndex', p.visibleIndex);
+            var actual = this._grid.columnOption(p.dataField, 'visibleIndex');
+            if (actual !== p.visibleIndex)
+                return _failure('Expected visibleIndex ' + p.visibleIndex + ' for "' + p.dataField + '", got ' + actual);
+            return _success();
+        }
+
+        async _columnsPinning(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            this._grid.columnOption(p.dataField, {
+                fixed: p.fixed,
+                fixedPosition: p.fixed ? (p.fixedPosition || 'left') : undefined
+            });
+            var actualFixed = this._grid.columnOption(p.dataField, 'fixed');
+            if (actualFixed !== p.fixed)
+                return _failure('Expected fixed=' + p.fixed + ' for "' + p.dataField + '", got ' + actualFixed);
+            if (p.fixed) {
+                var expectedPos = p.fixedPosition || 'left';
+                var actualPos = this._grid.columnOption(p.dataField, 'fixedPosition');
+                if (actualPos !== expectedPos)
+                    return _failure('Expected fixedPosition "' + expectedPos + '" for "' + p.dataField + '", got "' + actualPos + '".');
+            }
+            return _success();
+        }
+
+        async _columnsResize(p) {
+            var err = this._validateCol(p.dataField); if (err) return err;
+            if (typeof p.width === 'number' && p.width <= 0)
+                return _failure('width must be positive. Got: ' + p.width);
+            this._grid.columnOption(p.dataField, 'width', p.width);
+            var actual = this._grid.columnOption(p.dataField, 'width');
+            if (actual !== p.width)
+                return _failure('Expected width ' + p.width + ' for "' + p.dataField + '", got ' + actual);
+            return _success();
+        }
+
+        async _summary(p) {
+            if (p.totalItems === undefined && p.groupItems === undefined)
+                return _failure('summary payload must include at least one of "totalItems" or "groupItems".');
+            var current = this._grid.option('summary') || {};
+            var newSummary = Object.assign({}, current);
+            if (p.totalItems !== undefined) newSummary.totalItems = p.totalItems;
+            if (p.groupItems !== undefined) newSummary.groupItems = p.groupItems;
+            this._grid.option('summary', newSummary);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var applied = this._grid.option('summary') || {};
+            if (p.totalItems !== undefined) {
+                var actualTotal = applied.totalItems || [];
+                if (actualTotal.length !== p.totalItems.length)
+                    return _failure('Expected ' + p.totalItems.length + ' totalItems, got ' + actualTotal.length);
+            }
+            if (p.groupItems !== undefined) {
+                var actualGroup = applied.groupItems || [];
+                if (actualGroup.length !== p.groupItems.length)
+                    return _failure('Expected ' + p.groupItems.length + ' groupItems, got ' + actualGroup.length);
+            }
+            return _success();
+        }
+
+        async _clearSummary() {
+            this._grid.option('summary', { totalItems: [], groupItems: [] });
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
+            var applied = this._grid.option('summary') || {};
+            var totalItems = applied.totalItems || [];
+            var groupItems = applied.groupItems || [];
+            if (totalItems.length > 0 || groupItems.length > 0)
+                return _failure('clearSummary failed. totalItems: ' + totalItems.length + ', groupItems: ' + groupItems.length);
+            return _success();
+        }
+    }
+
+    /**
+     * ====================================================================
+     *  System prompt — describes the Tooling API actions for the LLM
+     * ====================================================================
+     */
+
+    const SYSTEM_PROMPT = `You help users control a DevExtreme DataGrid by returning a list of actions.
+
+You MUST respond with a JSON object: { "actions": [...], "explanation": "..." }
+
+Each action is: { "action": "<name>", "payload": { ... } }
+
+Available actions and payloads:
+
+1. sorting          — { "dataField": string, "sortOrder": "asc"|"desc"|"none" }
+2. clearSorting     — {}
+3. filtering        — { "dataField": string, "filterValue": string|number|null }
+                       (null clears filter on that column)
+4. filterValue      — { "expression": <FilterExpression>|null }
+                       FilterExpression: ["field","op",value] where op is "=","<>","<","<=",">",">=","contains","notcontains","startswith","endswith"
+                       Combine: [expr,"and"|"or",expr]  Negate: ["!",expr]
+5. clearFilter      — {}
+6. searching        — { "text": string } (empty string clears search)
+7. grouping         — { "dataField": string, "groupIndex": number|null }
+                       (null removes grouping)
+8. pageIndex        — { "pageIndex": number } (0-based)
+9. pageSize         — { "pageSize": number } (positive integer)
+10. rowFocusing     — { "key": number }
+11. selectByKeys    — { "keys": [number,...], "preserve": boolean }
+12. selectByIndexes — { "indexes": [number,...] }
+13. selectAll       — {}
+14. deselectAll     — {}
+15. clearSelection  — {}
+16. columnsVisibility — { "dataField": string, "visible": boolean }
+17. columnsReorder    — { "dataField": string, "visibleIndex": number }
+18. columnsPinning    — { "dataField": string, "fixed": boolean, "fixedPosition": "left"|"right" }
+19. columnsResize     — { "dataField": string, "width": number|string }
+20. summary         — { "totalItems": [{"column":string,"summaryType":"sum"|"min"|"max"|"avg"|"count","displayFormat":string}], "groupItems": [...] }
+21. clearSummary    — {}
+
+Grid key field: "ID" (numbers 1–12).
+Grid columns (dataField): ID (hidden), CompanyName (visible), Address (hidden), City (visible), State (visible), Zipcode (hidden), Phone (visible), Fax (hidden), Website (visible).
+Data: 12 company rows.
+
+Rules:
+- ONLY output valid JSON: { "actions": [...], "explanation": "..." }
+- No markdown fences, no prose outside JSON.
+- Use null for groupIndex when removing grouping.
+- For selectByKeys, keys are ID numbers (1–12).
+- Actions execute sequentially — order matters.
+- To reset everything, combine: clearSorting, clearFilter, clearSelection, clearSummary, plus columnsVisibility to restore defaults.
+- "explanation" should be a short human-readable summary of what was done.`;
+
+    /**
+     * ====================================================================
+     *  Azure OpenAI service (raw fetch, same DevExpress demo endpoint)
+     * ====================================================================
+     */
+
+    const AzureOpenAIConfig = {
+        deployment: 'gpt-4o-mini',
+        apiVersion: '2024-10-21',
+        endpoint: 'https://public-api.devexpress.com/demo-openai',
+        apiKey: 'DEMO',
+    };
+
+    async function getAIResponse(userMessage) {
+        var url = AzureOpenAIConfig.endpoint.replace(/\/+$/, '')
+            + '/openai/deployments/' + encodeURIComponent(AzureOpenAIConfig.deployment)
+            + '/chat/completions?api-version=' + encodeURIComponent(AzureOpenAIConfig.apiVersion);
+
+        var response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'api-key': AzureOpenAIConfig.apiKey,
+            },
+            body: JSON.stringify({
+                messages: [
+                    { role: 'system', content: SYSTEM_PROMPT },
+                    { role: 'user', content: userMessage },
+                ],
+                model: AzureOpenAIConfig.deployment,
+                max_tokens: 1000,
+                temperature: 0.2,
+                response_format: { type: 'json_object' },
+            }),
+        });
+
+        if (!response.ok) {
+            var errText = await response.text();
+            throw new Error('API error (' + response.status + '): ' + errText);
+        }
+
+        var data = await response.json();
+        var content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+
+        if (!content) {
+            throw new Error('No content received from API');
+        }
+
+        var parsed = JSON.parse(content);
+        console.log('AI response:', parsed);
+
+        // Normalize: accept { actions: [...] } or bare array
+        var actions = [];
+        if (Array.isArray(parsed.actions)) {
+            actions = parsed.actions;
+        } else if (Array.isArray(parsed)) {
+            actions = parsed;
+        } else if (parsed.action) {
+            actions = [parsed];
+        }
+
+        return {
+            actions: actions,
+            explanation: parsed.explanation || '',
+        };
+    }
+
+    /**
+     * ====================================================================
+     *  Execute action list via Tooling API
+     * ====================================================================
+     */
+
+    async function executeActions(api, actions) {
+        var results = [];
+        for (var i = 0; i < actions.length; i++) {
+            var a = actions[i];
+            var name = a.action;
+            var payload = a.payload || {};
+
+            // Normalize null groupIndex → undefined (JSON has no undefined)
+            if (name === 'grouping' && payload.groupIndex === null) {
+                payload.groupIndex = undefined;
+            }
+
+            var result = await api.action(name, payload);
+            results.push({ action: name, payload: payload, result: result });
+        }
+        return results;
+    }
+
+    /**
+     * ====================================================================
+     *  Sample data (from codepen)
+     * ====================================================================
+     */
+
+    var dataSource = [
+        { ID: 1,  CompanyName: "Premier Buy",      Address: "7601 Penn Avenue South",  City: "Richfield",      State: "Minnesota",       Zipcode: 55423, Phone: "(612) 291-1000", Fax: "(612) 291-2001", Website: "http://www.nowebsitepremierbuy.dx" },
+        { ID: 2,  CompanyName: "ElectrixMax",       Address: "263 Shuman Blvd",         City: "Naperville",     State: "Illinois",        Zipcode: 60563, Phone: "(630) 438-7800", Fax: "(630) 438-7801", Website: "http://www.nowebsiteelectrixmax.dx" },
+        { ID: 3,  CompanyName: "Video Emporium",    Address: "1201 Elm Street",         City: "Dallas",         State: "Texas",           Zipcode: 75270, Phone: "(214) 854-3000", Fax: "(214) 854-3001", Website: "http://www.nowebsitevideoemporium.dx" },
+        { ID: 4,  CompanyName: "Screen Shop",       Address: "1000 Lowes Blvd",         City: "Mooresville",    State: "North Carolina",  Zipcode: 28117, Phone: "(800) 445-6937", Fax: "(800) 445-6938", Website: "http://www.nowebsitescreenshop.dx" },
+        { ID: 5,  CompanyName: "Braeburn",          Address: "1 Infinite Loop",         City: "Cupertino",      State: "California",      Zipcode: 95014, Phone: "(408) 996-1010", Fax: "(408) 996-1012", Website: "http://www.nowebsitebraeburn.dx" },
+        { ID: 6,  CompanyName: "PriceCo",           Address: "30 Hunter Lane",          City: "Camp Hill",      State: "Pennsylvania",    Zipcode: 17011, Phone: "(717) 761-2633", Fax: "(717) 761-2334", Website: "http://www.nowebsitepriceco.dx" },
+        { ID: 7,  CompanyName: "Ultimate Gadget",   Address: "1557 Watson Blvd",        City: "Warner Robbins", State: "Georgia",         Zipcode: 31093, Phone: "(995) 623-6785", Fax: "(995) 623-6786", Website: "http://www.nowebsiteultimategadget.dx" },
+        { ID: 8,  CompanyName: "EZ Stop",           Address: "618 Michillinda Ave.",     City: "Arcadia",        State: "California",      Zipcode: 91007, Phone: "(626) 265-8632", Fax: "(626) 265-8633", Website: "http://www.nowebsiteezstop.dx" },
+        { ID: 9,  CompanyName: "Clicker",           Address: "1100 W. Artesia Blvd.",   City: "Compton",        State: "California",      Zipcode: 90220, Phone: "(310) 884-9000", Fax: "(310) 884-9001", Website: "http://www.nowebsiteclicker.dx" },
+        { ID: 10, CompanyName: "Store of America",  Address: "2401 Utah Ave. South",    City: "Seattle",        State: "Washington",      Zipcode: 98134, Phone: "(206) 447-1575", Fax: "(206) 447-1576", Website: "http://www.nowebsiteamerica.dx" },
+        { ID: 11, CompanyName: "Zone Toys",         Address: "1945 S Cienega Boulevard",City: "Los Angeles",    State: "California",      Zipcode: 90034, Phone: "(310) 237-5642", Fax: "(310) 237-5643", Website: "http://www.nowebsitezonetoys.dx" },
+        { ID: 12, CompanyName: "ACME",              Address: "2525 E El Segundo Blvd",  City: "El Segundo",     State: "California",      Zipcode: 90245, Phone: "(310) 536-0611", Fax: "(310) 536-0612", Website: "http://www.nowebsiteacme.dx" },
+    ];
+
+    /**
+     * ====================================================================
+     *  UI wiring
+     * ====================================================================
+     */
+
+    $(() => {
+        // ── Grid ──
+
+        var grid = $('#gridContainer').dxDataGrid({
+            keyExpr: 'ID',
+            dataSource: dataSource,
+            showBorders: true,
+            allowColumnReordering: true,
+            allowColumnResizing: true,
+            focusedRowEnabled: true,
+            columnFixing: { enabled: true },
+            columnChooser: { enabled: true },
+            selection: { mode: 'multiple' },
+            searchPanel: { visible: true, width: 240, placeholder: 'Search...' },
+            filterRow: { visible: true },
+            headerFilter: { visible: true },
+            groupPanel: { visible: true },
+            paging: { pageSize: 5 },
+            pager: {
+                visible: true,
+                showPageSizeSelector: true,
+                allowedPageSizes: [5, 10],
+                showNavigationButtons: true,
+                showInfo: true,
+            },
+            toolbar: {
+                items: [
+                    'groupPanel',
+                    {
+                        location: 'after',
+                        widget: 'dxButton',
+                        cssClass: 'assistant_btn',
+                        options: {
+                            icon: 'sparkle',
+                            onClick: function() {
+                                $('#aiAssistant').dxPopup('instance').show();
+                            },
+                        },
+                    },
+                    'searchPanel',
+                ],
+            },
+            columns: [
+                { dataField: 'ID', width: 60, visible: false },
+                { dataField: 'CompanyName' },
+                { dataField: 'Address', visible: false },
+                { dataField: 'City' },
+                { dataField: 'State' },
+                { dataField: 'Zipcode', visible: false },
+                { dataField: 'Phone' },
+                { dataField: 'Fax', visible: false },
+                { dataField: 'Website' },
+            ],
+        }).dxDataGrid('instance');
+
+        var api = new DataGridToolingApi(grid);
+
+        // ── Helpers for rendering ──
+
+        function updateIcon($container, iconName) {
+            $container.find('.my-icon')
+                .removeClass()
+                .addClass('my-icon dx-icon dx-icon-' + iconName);
+        }
+
+        function buildActionResultsHtml(results) {
+            var items = results.map(function(r) {
+                var ok = r.result.status === 'success';
+                var cls = ok ? 'ok' : 'fail';
+                var icon = ok ? '✓' : '✗';
+                var error = ok ? '' : '<span class="action-error"> — ' + r.result.error + '</span>';
+                var payloadStr = JSON.stringify(r.payload);
+                return '<div class="action-result-item ' + cls + '">'
+                    + '<span>' + icon + '</span>'
+                    + '<span class="action-name">' + r.action + '</span>'
+                    + '<span class="action-payload">' + payloadStr + '</span>'
+                    + error
+                    + '</div>';
+            });
+            return '<div class="action-results">' + items.join('') + '</div>';
+        }
+
+        // ── Render assistant message ──
+
+        async function renderMessageContent(message, element) {
+            var $container = $('<div/>')
+                .addClass('message-container dx-pending')
+                .appendTo(element);
+
+            $('<i/>').addClass('my-icon dx-icon dx-icon-sparkle').appendTo($container);
+
+            var $content = $('<div/>').addClass('message-content').appendTo($container);
+
+            $('<b>')
+                .addClass('dx-chat-messagebubble-header')
+                .text(message.text)
+                .appendTo($content);
+
+            var $operation = $('<div>')
+                .addClass('dx-chat-messagebubble-operation')
+                .text('Processing…')
+                .appendTo($content);
+
+            var progressBar = $('<div>').dxProgressBar({
+                value: false,
+                visible: true,
+                showStatus: false,
+                width: '100%',
+            }).appendTo(element).dxProgressBar('instance');
+
+            try {
+                // 1. Call AI
+                var aiResponse = await getAIResponse(message.text);
+
+                // 2. Execute actions via Tooling API
+                var results = await executeActions(api, aiResponse.actions);
+
+                // 3. Update UI
+                progressBar.option('visible', false);
+
+                var allOk = results.every(function(r) { return r.result.status === 'success'; });
+
+                if (allOk) {
+                    $container.removeClass('dx-pending').addClass('dx-success');
+                    updateIcon($container, 'checkmarkcircle');
+                    $operation.text(aiResponse.explanation || 'Success');
+                } else {
+                    var failCount = results.filter(function(r) { return r.result.status !== 'success'; }).length;
+                    $container.removeClass('dx-pending').addClass('dx-error');
+                    updateIcon($container, 'info');
+                    $operation.text(failCount + ' of ' + results.length + ' action(s) failed');
+                }
+
+                // 4. Append per-action results log
+                $content.append(buildActionResultsHtml(results));
+
+            } catch (err) {
+                progressBar.option('visible', false);
+                $container.removeClass('dx-pending').addClass('dx-error');
+                updateIcon($container, 'info');
+                $operation.text('Error: ' + (err.message || String(err)));
+            }
+        }
+
+        // ── Chat popup ──
+
+        $('#aiAssistant').dxPopup({
+            title: 'AI Assistant (Tooling API)',
+            width: 600,
+            height: '80%',
+            visible: false,
+            showCloseButton: true,
+            toolbarItems: [{
+                toolbar: 'top',
+                location: 'after',
+                widget: 'dxButton',
+                options: {
+                    icon: 'chatadd',
+                    stylingMode: 'text',
+                    onClick: function() {
+                        $('#chatContainer').dxChat('instance').option('dataSource', []);
+                    },
+                },
+            }],
+            contentTemplate: function() {
+                return $('<div>').attr('id', 'chatContainer').dxChat({
+                    user: { id: 'user1', name: 'User' },
+                    dataSource: [],
+                    height: '100%',
+                    showAvatar: false,
+                    showDayHeaders: false,
+                    showMessageTimestamp: false,
+                    onMessageEntered: function(e) {
+                        var chatInstance = e.component;
+
+                        var assistantMessage = {
+                            id: Date.now(),
+                            timestamp: new Date(),
+                            author: { id: 'assistant', name: 'AI Assistant' },
+                            text: e.message.text,
+                        };
+
+                        chatInstance.option('dataSource', [
+                            ...chatInstance.option('dataSource'),
+                            assistantMessage,
+                        ]);
+                    },
+                    messageTemplate: function(data, element) {
+                        var message = data.message;
+
+                        if (message.author && message.author.id === 'assistant') {
+                            renderMessageContent(message, element);
+                        } else {
+                            element.text(message.text);
+                        }
+                    },
+                });
+            },
+        });
+    });
+    </script>
+</body>
+</html>
+
