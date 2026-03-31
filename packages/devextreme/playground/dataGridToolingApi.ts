@@ -262,6 +262,22 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     return null;
   }
 
+  // ── Data readiness helper ─────────────────────
+  // After changing sorting, filtering, grouping, searching, or column
+  // options, the grid may need to reload data from a remote server.
+  // Calling refresh() and awaiting its promise ensures the round‑trip
+  // completes before we verify the outcome.
+
+  private async waitForDataReady(): Promise<ActionResult | null> {
+    try {
+      await toNativePromise(this.grid.refresh());
+      return null;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      return failure(`Data refresh failed: ${message}`);
+    }
+  }
+
   // ── Handlers ─────────────────────────────────
 
   // -- Sorting -----------------------------------
@@ -274,6 +290,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
     const effectiveOrder = sortOrder === 'none' ? undefined : sortOrder;
     this.grid.columnOption(dataField, 'sortOrder', effectiveOrder as string | undefined);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
 
     const actual = this.grid.columnOption(dataField, 'sortOrder') as string | undefined;
     if (effectiveOrder === undefined && actual !== undefined) {
@@ -288,6 +307,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
   private async handleClearSorting(_payload: ClearSortingPayload): Promise<ActionResult> {
     this.grid.clearSorting();
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
 
     const columns = this.grid.getVisibleColumns();
     const stillSorted = columns.filter((c) => c.sortOrder !== undefined);
@@ -309,6 +331,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
 
     this.grid.columnOption(dataField, 'filterValue', filterValue);
 
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
     const actual = this.grid.columnOption(dataField, 'filterValue') as unknown;
     if (filterValue === null && actual !== undefined && actual !== null) {
       return failure(`Filter was not cleared for column "${dataField}". Current filterValue: "${String(actual)}".`);
@@ -326,6 +351,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     const { expression } = payload;
 
     this.grid.option('filterValue', expression as never);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
 
     const actual = this.grid.option('filterValue');
     if (expression === null) {
@@ -346,6 +374,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
   private async handleClearFilter(_payload: ClearFilterPayload): Promise<ActionResult> {
     this.grid.clearFilter();
 
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
+
     const combined = this.grid.getCombinedFilter();
     if (combined !== undefined) {
       return failure(`clearFilter did not remove all filters. Combined filter: ${JSON.stringify(combined)}.`);
@@ -360,6 +391,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     const { text } = payload;
 
     this.grid.searchByText(text);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
 
     const actual = this.grid.option('searchPanel.text') as string;
     if (actual !== text) {
@@ -378,6 +412,9 @@ export class DataGridToolingApi<TRowData = unknown, TKey = unknown> {
     if (colError) return colError;
 
     this.grid.columnOption(dataField, 'groupIndex', groupIndex as number | undefined);
+
+    const refreshError = await this.waitForDataReady();
+    if (refreshError) return refreshError;
 
     const actual = this.grid.columnOption(dataField, 'groupIndex') as number | undefined;
     if (groupIndex === undefined && actual !== undefined && actual !== -1) {

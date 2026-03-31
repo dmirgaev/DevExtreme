@@ -113,6 +113,17 @@
             align-items: center;
             margin-top: 12px;
         }
+
+        /* ── Data mode indicator ── */
+        #dataModeBadge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        #dataModeBadge.local  { background: #e8f5e9; color: #2e7d32; }
+        #dataModeBadge.remote { background: #e3f2fd; color: #1565c0; }
     </style>
 
     <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
@@ -131,8 +142,10 @@
             <!-- DataGrid container -->
             <div id="gridContainer"></div>
 
-            <!-- Toolbar: Run All + Clear Log -->
+            <!-- Toolbar: data mode switch + Run All + Clear Log -->
             <div class="toolbar-row">
+                <div id="dataModeSwitch"></div>
+                <span id="dataModeBadge" class="local">📦 Local data</span>
                 <div id="runAllButton"></div>
                 <div id="clearLogButton"></div>
             </div>
@@ -215,10 +228,18 @@
             return null;
         }
 
+        // Wait for data reload to complete (critical for remote data sources).
+        // Returns null on success, or a failure ActionResult if refresh rejects.
+        async _waitForDataReady() {
+            try { await _toPromise(this._grid.refresh()); return null; }
+            catch(e) { return _failure('Data refresh failed: ' + (e.message || e)); }
+        }
+
         async _sorting(p) {
             var err = this._validateCol(p.dataField); if (err) return err;
             var order = p.sortOrder === 'none' ? undefined : p.sortOrder;
             this._grid.columnOption(p.dataField, 'sortOrder', order);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var actual = this._grid.columnOption(p.dataField, 'sortOrder');
             if (order === undefined && actual !== undefined)
                 return _failure('Sorting was not cleared for "' + p.dataField + '". Got: "' + actual + '".');
@@ -229,6 +250,7 @@
 
         async _clearSorting() {
             this._grid.clearSorting();
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var cols = this._grid.getVisibleColumns();
             var still = cols.filter(function(c) { return c.sortOrder !== undefined; });
             if (still.length > 0)
@@ -239,6 +261,7 @@
         async _filtering(p) {
             var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, 'filterValue', p.filterValue);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var actual = this._grid.columnOption(p.dataField, 'filterValue');
             if (p.filterValue === null && actual !== undefined && actual !== null)
                 return _failure('Filter not cleared for "' + p.dataField + '". Got: "' + actual + '".');
@@ -249,6 +272,7 @@
 
         async _filterValue(p) {
             this._grid.option('filterValue', p.expression);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var actual = this._grid.option('filterValue');
             if (p.expression === null) {
                 if (actual !== null && actual !== undefined)
@@ -262,6 +286,7 @@
 
         async _clearFilter() {
             this._grid.clearFilter();
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var combined = this._grid.getCombinedFilter();
             if (combined !== undefined)
                 return _failure('clearFilter failed. Combined: ' + JSON.stringify(combined));
@@ -270,6 +295,7 @@
 
         async _searching(p) {
             this._grid.searchByText(p.text);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var actual = this._grid.option('searchPanel.text');
             if (actual !== p.text)
                 return _failure('Expected searchPanel.text "' + p.text + '", got "' + actual + '".');
@@ -279,6 +305,7 @@
         async _grouping(p) {
             var err = this._validateCol(p.dataField); if (err) return err;
             this._grid.columnOption(p.dataField, 'groupIndex', p.groupIndex);
+            var refreshErr = await this._waitForDataReady(); if (refreshErr) return refreshErr;
             var actual = this._grid.columnOption(p.dataField, 'groupIndex');
             if (p.groupIndex === undefined && actual !== undefined && actual !== -1)
                 return _failure('Grouping not cleared for "' + p.dataField + '". Got: ' + actual);
@@ -740,42 +767,103 @@
         { ID: 10, FirstName: 'Taylor',  LastName: 'Riley',     Position: 'Support',   City: 'San Jose',    State: 'California', HireDate: '2016-12-01' },
     ];
 
+    // Shared grid config (without dataSource / remoteOperations)
+    var gridConfig = {
+        keyExpr: 'ID',
+        showBorders: true,
+        allowColumnReordering: true,
+        allowColumnResizing: true,
+        columnFixing: { enabled: true },
+        focusedRowEnabled: true,
+        selection: { mode: 'multiple' },
+        searchPanel: { visible: true },
+        filterRow: { visible: true },
+        groupPanel: { visible: true },
+        paging: { pageSize: 5 },
+        pager: {
+            visible: true,
+            showPageSizeSelector: true,
+            allowedPageSizes: [5, 10],
+            showNavigationButtons: true,
+            showInfo: true,
+        },
+        columns: [
+            { dataField: 'ID', width: 60 },
+            { dataField: 'FirstName' },
+            { dataField: 'LastName' },
+            { dataField: 'Position' },
+            { dataField: 'City' },
+            { dataField: 'State' },
+            { dataField: 'HireDate', dataType: 'date' },
+        ],
+    };
+
     $(() => {
-        const dataGrid = $('#gridContainer').dxDataGrid({
-            dataSource: sampleData,
-            keyExpr: 'ID',
-            showBorders: true,
-            allowColumnReordering: true,
-            allowColumnResizing: true,
-            columnFixing: { enabled: true },
-            focusedRowEnabled: true,
-            selection: { mode: 'multiple' },
-            searchPanel: { visible: true },
-            filterRow: { visible: true },
-            groupPanel: { visible: true },
-            paging: { pageSize: 5 },
-            pager: {
-                visible: true,
-                showPageSizeSelector: true,
-                allowedPageSizes: [5, 10],
-                showNavigationButtons: true,
-                showInfo: true,
-            },
-            columns: [
-                { dataField: 'ID', width: 60 },
-                { dataField: 'FirstName' },
-                { dataField: 'LastName' },
-                { dataField: 'Position' },
-                { dataField: 'City' },
-                { dataField: 'State' },
-                { dataField: 'HireDate', dataType: 'date' },
-            ],
-        }).dxDataGrid('instance');
+        // ── Data sources ──
 
-        const api = new DataGridToolingApi(dataGrid);
+        var localDataSource = sampleData;
+
+        var REMOTE_LATENCY_MS = 500;
+
+        var remoteBackingStore = new DevExpress.data.ArrayStore({
+            key: 'ID',
+            data: sampleData.map(function(r) { return $.extend({}, r); }),
+        });
+
+        var remoteDataSource = {
+            store: new DevExpress.data.CustomStore({
+                key: 'ID',
+                load: function(loadOptions) {
+                    var d = $.Deferred();
+                    setTimeout(function() {
+                        remoteBackingStore.load(loadOptions).done(function(data) {
+                            remoteBackingStore.totalCount(loadOptions).done(function(count) {
+                                d.resolve(data, { totalCount: count });
+                            });
+                        }).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+                byKey: function(key) {
+                    return remoteBackingStore.byKey(key);
+                },
+                totalCount: function(loadOptions) {
+                    var d = $.Deferred();
+                    setTimeout(function() {
+                        remoteBackingStore.totalCount(loadOptions).done(d.resolve).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+            }),
+        };
+
+        // ── State ──
+
+        var isRemote = false;
+        var api = null;
+
+        function createGrid() {
+            var $container = $('#gridContainer');
+            // Dispose previous instance if any
+            var prev = $container.data('dxDataGrid');
+            if (prev) prev.dispose();
+            $container.empty();
+
+            var opts = $.extend(true, {}, gridConfig);
+            opts.dataSource = isRemote ? remoteDataSource : localDataSource;
+            if (isRemote) {
+                opts.remoteOperations = { filtering: true, sorting: true, paging: true, grouping: true };
+            }
+
+            var grid = $container.dxDataGrid(opts).dxDataGrid('instance');
+            api = new DataGridToolingApi(grid);
+        }
+
+        createGrid();
+
+        // ── Log ──
+
         const $log = $('#log');
-
-        // ── Log helpers ──
 
         function logSection(title) {
             $log.append('<div class="log-section">── ' + title + ' ──</div>');
@@ -801,21 +889,22 @@
         // ── Execute a single action def ──
 
         async function runActionDef(def) {
-            // Special sequence: clearFilter demo
+            var modeLabel = isRemote ? '🌐 ' : '';
+
             if (def.action === '_sequence_clearFilter') {
-                logSection(def.section);
+                logSection(modeLabel + def.section);
                 $log.append('<div class="log-args">Step 1: filtering { dataField: "City", filterValue: "Boise" }</div>');
                 await api.action('filtering', { dataField: 'City', filterValue: 'Boise' });
                 $log.append('<div class="log-args">Step 2: clearFilter {}</div>');
                 var result = await api.action('clearFilter', {});
-                logResult(def.label, result, def.expect);
+                logResult(modeLabel + def.label, result, def.expect);
                 return;
             }
 
-            logSection(def.section + ' → ' + def.label);
+            logSection(modeLabel + def.section + ' → ' + def.label);
             logArgs(def.args);
             var result = await api.action(def.action, def.args);
-            logResult(def.label, result, def.expect);
+            logResult(modeLabel + def.label, result, def.expect);
         }
 
         // ── Build action buttons panel ──
@@ -824,8 +913,7 @@
         var currentSection = '';
         var $sectionBody = null;
 
-        ACTION_DEFS.forEach(function(def, idx) {
-            // Create section if new
+        ACTION_DEFS.forEach(function(def) {
             if (def.section !== currentSection) {
                 currentSection = def.section;
                 var $section = $('<div class="action-section">');
@@ -838,12 +926,9 @@
             var $wrap = $('<div class="action-btn-wrap">');
             var $btnContainer = $('<div>');
             $wrap.append($btnContainer);
-
-            // Tooltip
             $wrap.append('<div class="tip">' + def.tip + '</div>');
             $sectionBody.append($wrap);
 
-            // Create button with expected-result hint in the label
             var expectHint = def.expect === 'failure' ? '  (expect ✗)' : '';
             $btnContainer.dxButton({
                 text: def.label + expectHint,
@@ -851,11 +936,34 @@
                 stylingMode: 'outlined',
                 onClick: async function() {
                     await runActionDef(def);
-                    // Scroll log to bottom
-                    var logEl = $log[0];
-                    logEl.scrollTop = logEl.scrollHeight;
+                    $log[0].scrollTop = $log[0].scrollHeight;
                 },
             });
+        });
+
+        // ── Data mode switch ──
+
+        var $badge = $('#dataModeBadge');
+
+        function updateBadge() {
+            if (isRemote) {
+                $badge.attr('class', 'remote').text('🌐 Remote data (' + REMOTE_LATENCY_MS + 'ms latency)');
+            } else {
+                $badge.attr('class', 'local').text('📦 Local data');
+            }
+        }
+
+        $('#dataModeSwitch').dxSwitch({
+            value: false,
+            switchedOnText: 'Remote',
+            switchedOffText: 'Local',
+            // width: 90,
+            onValueChanged: function(e) {
+                isRemote = e.value;
+                updateBadge();
+                createGrid();
+                $log.empty();
+            },
         });
 
         // ── Run All button ──
@@ -865,7 +973,8 @@
             type: 'default',
             onClick: async function() {
                 $log.empty();
-                $log.append('<div class="log-section">Available actions: ' + api.getAvailableActions().join(', ') + '</div>');
+                var mode = isRemote ? '🌐 Remote' : '📦 Local';
+                $log.append('<div class="log-section">' + mode + ' — Available actions: ' + api.getAvailableActions().join(', ') + '</div>');
 
                 for (var i = 0; i < ACTION_DEFS.length; i++) {
                     await runActionDef(ACTION_DEFS[i]);
