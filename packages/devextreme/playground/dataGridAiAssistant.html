@@ -51,6 +51,22 @@
         .action-result-item.fail { color: #C50F1F; }
         .action-result-item .action-name { font-weight: 600; }
         .action-result-item .action-error { font-style: italic; }
+
+        .toolbar-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        #dataModeBadge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        #dataModeBadge.local  { background: #e8f5e9; color: #2e7d32; }
+        #dataModeBadge.remote { background: #e3f2fd; color: #1565c0; }
     </style>
 
     <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
@@ -66,10 +82,16 @@
         <select id="theme-selector" style="display: block;"></select>
         <br />
 
+        <div class="toolbar-row">
+            <div id="dataModeSwitch"></div>
+            <span id="dataModeBadge" class="local">📦 Local data</span>
+        </div>
+
         <div class="aiAssistantWrapper">
             <div id="aiAssistantBtn"></div>
             <div id="aiAssistant"></div>
         </div>
+
         <div id="gridContainer"></div>
     </div>
 
@@ -567,7 +589,7 @@ Rules:
         return results;
     }
 
-    var dataSource = [
+    var sampleData = [
         { ID: 1,  CompanyName: "Premier Buy",      Address: "7601 Penn Avenue South",   City: "Richfield",      State: "Minnesota",      Zipcode: 55423, Phone: "(612) 291-1000", Fax: "(612) 291-2001", Website: "http://www.nowebsitepremierbuy.dx" },
         { ID: 2,  CompanyName: "ElectrixMax",       Address: "263 Shuman Blvd",          City: "Naperville",     State: "Illinois",       Zipcode: 60563, Phone: "(630) 438-7800", Fax: "(630) 438-7801", Website: "http://www.nowebsiteelectrixmax.dx" },
         { ID: 3,  CompanyName: "Video Emporium",    Address: "1201 Elm Street",          City: "Dallas",         State: "Texas",          Zipcode: 75270, Phone: "(214) 854-3000", Fax: "(214) 854-3001", Website: "http://www.nowebsitevideoemporium.dx" },
@@ -582,58 +604,131 @@ Rules:
         { ID: 12, CompanyName: "ACME",              Address: "2525 E El Segundo Blvd",   City: "El Segundo",     State: "California",     Zipcode: 90245, Phone: "(310) 536-0611", Fax: "(310) 536-0612", Website: "http://www.nowebsiteacme.dx" },
     ];
 
-    $(() => {
-        const grid = $('#gridContainer').dxDataGrid({
-            keyExpr: 'ID',
-            dataSource,
-            showBorders: true,
-            allowColumnReordering: true,
-            allowColumnResizing: true,
-            focusedRowEnabled: true,
-            columnFixing: { enabled: true },
-            columnChooser: { enabled: true },
-            selection: { mode: 'multiple' },
-            searchPanel: { visible: true, width: 240, placeholder: 'Search...' },
-            filterRow: { visible: true },
-            headerFilter: { visible: true },
-            groupPanel: { visible: true },
-            paging: { pageSize: 5 },
-            pager: {
-                visible: true,
-                showPageSizeSelector: true,
-                allowedPageSizes: [5, 10],
-                showNavigationButtons: true,
-                showInfo: true,
-            },
-            toolbar: {
-                items: [
-                    'groupPanel',
-                    {
-                        location: 'after',
-                        widget: 'dxButton',
-                        cssClass: 'assistant_btn',
-                        options: {
-                            icon: 'sparkle',
-                            onClick() { $('#aiAssistant').dxPopup('instance').show(); },
-                        },
+    var gridConfig = {
+        keyExpr: 'ID',
+        showBorders: true,
+        allowColumnReordering: true,
+        allowColumnResizing: true,
+        focusedRowEnabled: true,
+        columnFixing: { enabled: true },
+        columnChooser: { enabled: true },
+        selection: { mode: 'multiple' },
+        searchPanel: { visible: true, width: 240, placeholder: 'Search...' },
+        filterRow: { visible: true },
+        headerFilter: { visible: true },
+        groupPanel: { visible: true },
+        paging: { pageSize: 5 },
+        pager: {
+            visible: true,
+            showPageSizeSelector: true,
+            allowedPageSizes: [5, 10],
+            showNavigationButtons: true,
+            showInfo: true,
+        },
+        toolbar: {
+            items: [
+                'groupPanel',
+                {
+                    location: 'after',
+                    widget: 'dxButton',
+                    cssClass: 'assistant_btn',
+                    options: {
+                        icon: 'sparkle',
+                        onClick() { $('#aiAssistant').dxPopup('instance').show(); },
                     },
-                    'searchPanel',
-                ],
-            },
-            columns: [
-                { dataField: 'ID', width: 60, visible: false },
-                { dataField: 'CompanyName' },
-                { dataField: 'Address', visible: false },
-                { dataField: 'City' },
-                { dataField: 'State' },
-                { dataField: 'Zipcode', visible: false },
-                { dataField: 'Phone' },
-                { dataField: 'Fax', visible: false },
-                { dataField: 'Website' },
+                },
+                'searchPanel',
             ],
-        }).dxDataGrid('instance');
+        },
+        columns: [
+            { dataField: 'ID', width: 60, visible: false },
+            { dataField: 'CompanyName' },
+            { dataField: 'Address', visible: false },
+            { dataField: 'City' },
+            { dataField: 'State' },
+            { dataField: 'Zipcode', visible: false },
+            { dataField: 'Phone' },
+            { dataField: 'Fax', visible: false },
+            { dataField: 'Website' },
+        ],
+    };
 
-        const api = new DataGridToolingApi(grid);
+    $(() => {
+        const REMOTE_LATENCY_MS = 500;
+
+        const remoteBackingStore = new DevExpress.data.ArrayStore({
+            key: 'ID',
+            data: sampleData.map(r => $.extend({}, r)),
+        });
+
+        const remoteDataSource = {
+            store: new DevExpress.data.CustomStore({
+                key: 'ID',
+                load(loadOptions) {
+                    const d = $.Deferred();
+                    setTimeout(() => {
+                        remoteBackingStore.load(loadOptions).done(data => {
+                            remoteBackingStore.totalCount(loadOptions).done(count => {
+                                d.resolve(data, { totalCount: count });
+                            });
+                        }).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+                byKey(key) {
+                    return remoteBackingStore.byKey(key);
+                },
+                totalCount(loadOptions) {
+                    const d = $.Deferred();
+                    setTimeout(() => {
+                        remoteBackingStore.totalCount(loadOptions).done(d.resolve).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+            }),
+        };
+
+        let isRemote = false;
+        let api = null;
+
+        function createGrid() {
+            const $container = $('#gridContainer');
+            const prev = $container.data('dxDataGrid');
+            if (prev) prev.dispose();
+            $container.empty();
+
+            const opts = $.extend(true, {}, gridConfig);
+            opts.dataSource = isRemote ? remoteDataSource : sampleData;
+            if (isRemote) {
+                opts.remoteOperations = { filtering: true, sorting: true, paging: true, grouping: true };
+            }
+
+            const grid = $container.dxDataGrid(opts).dxDataGrid('instance');
+            api = new DataGridToolingApi(grid);
+        }
+
+        createGrid();
+
+        const $badge = $('#dataModeBadge');
+
+        function updateBadge() {
+            if (isRemote) {
+                $badge.attr('class', 'remote').text('🌐 Remote data (' + REMOTE_LATENCY_MS + 'ms latency)');
+            } else {
+                $badge.attr('class', 'local').text('📦 Local data');
+            }
+        }
+
+        $('#dataModeSwitch').dxSwitch({
+            value: false,
+            switchedOnText: 'Remote',
+            switchedOffText: 'Local',
+            onValueChanged(e) {
+                isRemote = e.value;
+                updateBadge();
+                createGrid();
+            },
+        });
 
         function updateIcon($container, iconName) {
             $container.find('.my-icon')
