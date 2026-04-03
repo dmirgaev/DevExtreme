@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>DataGrid AI Assistant — Structured JSON</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <script type="text/javascript">
+        const currentThemeId = localStorage.getItem("currentThemeId") || "light";
+        const link = document.createElement("link");
+        link.href = `../artifacts/css/dx.${currentThemeId}.css`;
+        link.type = "text/css";
+        link.rel = "stylesheet";
+        document.getElementsByTagName("head")[0].appendChild(link);
+    </script>
+
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        .aiAssistantWrapper { display: flex; width: 100%; margin-top: 1em; }
+        #aiAssistantBtn { margin-left: auto; }
+
+        .dx-chat-messagegroup { display: block; }
+        .dx-chat-messagegroup-alignment-start { justify-items: unset; }
+        .dx-chat-messagebubble { width: 100%; position: relative; overflow: hidden; }
+
+        .assistant_btn {
+            display: block;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            margin: 5px 0;
+            position: relative;
+            top: 2px;
+        }
+
+        .message-container { display: flex; gap: 4px; }
+        .dx-pending .my-icon, .dx-pending .dx-chat-messagebubble-operation { color: #0F6CBD; }
+        .dx-success .my-icon, .dx-success .dx-chat-messagebubble-operation { color: #107C10; }
+        .dx-error   .my-icon, .dx-error   .dx-chat-messagebubble-operation { color: #C50F1F; }
+
+        .action-results {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: var(--dx-color-main-bg, #f5f5f5);
+            border-radius: 6px;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .action-result-item { display: flex; gap: 6px; align-items: baseline; }
+        .action-result-item.ok   { color: #107C10; }
+        .action-result-item.fail { color: #C50F1F; }
+        .action-result-item .action-name { font-weight: 600; }
+        .action-result-item .action-error { font-style: italic; }
+
+        .toolbar-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        #dataModeBadge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        #dataModeBadge.local  { background: #e8f5e9; color: #2e7d32; }
+        #dataModeBadge.remote { background: #e3f2fd; color: #1565c0; }
+    </style>
+
+    <script type="text/javascript" src="../artifacts/js/jquery.js"></script>
+    <script type="text/javascript" src="../artifacts/js/dx.all.debug.js" charset="utf-8"></script>
+    <script type="text/javascript" src="./themeSelector.js"></script>
+    <script type="module">
+        import { AzureOpenAI } from "https://esm.sh/openai@4.73.1";
+        window.AzureOpenAI = AzureOpenAI;
+    </script>
+</head>
+<body class="dx-surface">
+    <div role="main">
+        <select id="theme-selector" style="display: block;"></select>
+        <br />
+
+        <div class="toolbar-row">
+            <div id="dataModeSwitch"></div>
+            <span id="dataModeBadge" class="local">📦 Local data</span>
+        </div>
+
+        <div class="aiAssistantWrapper">
+            <div id="aiAssistantBtn"></div>
+            <div id="aiAssistant"></div>
+        </div>
+
+        <div id="gridContainer"></div>
+    </div>
+
+    <script>
+    const ACTION_NAMES = Object.freeze([
+        'sorting', 'clearSorting', 'filtering', 'filterValue', 'clearFilter',
+        'searching', 'grouping', 'page', 'pageSize', 'rowFocusing',
+        'selectByKeys', 'selectByIndexes', 'selectAll', 'deselectAll', 'clearSelection',
+        'columnsVisibility', 'columnsReorder', 'columnsPinning', 'columnsResize',
+        'summary', 'clearSummary', 'help',
+    ]);
+
+    const ACTION_HELP = Object.freeze({
+        sorting:           'Sort a column ascending, descending, or remove its sort',
+        clearSorting:      'Remove sorting from all columns at once',
+        filtering:         'Set or clear a filter value on a single column',
+        filterValue:       'Apply a combined filter expression across columns',
+        clearFilter:       'Remove all active filters (column-level, combined, and search)',
+        searching:         'Set or clear the global search text',
+        grouping:          'Group rows by a column or remove grouping',
+        page:              'Navigate to a specific page (1-based: page 1 is first)',
+        pageSize:          'Change the number of rows per page',
+        rowFocusing:       'Focus and scroll to a specific row by key',
+        selectByKeys:      'Select rows by their key values',
+        selectByIndexes:   'Select rows by their visible indexes on the current page',
+        selectAll:         'Select all rows across all pages',
+        deselectAll:       'Deselect all currently selected rows',
+        clearSelection:    'Clear the entire selection',
+        columnsVisibility: 'Show or hide a column',
+        columnsReorder:    'Move a column to a new visual position',
+        columnsPinning:    'Pin (fix) a column to the left or right edge',
+        columnsResize:     'Change a column width',
+        summary:           'Add total or group summary items (count, sum, min, max, avg)',
+        clearSummary:      'Remove all summary items',
+        help:              'Show this list of available actions',
+    });
+
+    function _success() { return { status: 'success' }; }
+    function _failure(msg) { return { status: 'failure', error: msg }; }
+    function _isActionName(name) { return ACTION_NAMES.includes(name); }
+
+    class DataGridToolingApi {
+        constructor(grid) {
+            this._grid = grid;
+            this._handlers = {
+                sorting:           (p) => this._sorting(p),
+                clearSorting:      ()  => this._clearSorting(),
+                filtering:         (p) => this._filtering(p),
+                filterValue:       (p) => this._filterValue(p),
+                clearFilter:       ()  => this._clearFilter(),
+                searching:         (p) => this._searching(p),
+                grouping:          (p) => this._grouping(p),
+                page:              (p) => this._page(p),
+                pageSize:          (p) => this._pageSize(p),
+                rowFocusing:       (p) => this._rowFocusing(p),
+                selectByKeys:      (p) => this._selectByKeys(p),
+                selectByIndexes:   (p) => this._selectByIndexes(p),
+                selectAll:         ()  => this._selectAll(),
+                deselectAll:       ()  => this._deselectAll(),
+                clearSelection:    ()  => this._clearSelection(),
+                columnsVisibility: (p) => this._columnsVisibility(p),
+                columnsReorder:    (p) => this._columnsReorder(p),
+                columnsPinning:    (p) => this._columnsPinning(p),
+                columnsResize:     (p) => this._columnsResize(p),
+                summary:           (p) => this._summary(p),
+                clearSummary:      ()  => this._clearSummary(),
+                help:              ()  => this._help(),
+            };
+        }
+
+        getAvailableActions() { return ACTION_NAMES; }
+
+        getHelp() {
+            return Object.entries(ACTION_HELP).map(([name, description]) => ({ name, description }));
+        }
+
+        async action(name, payload) {
+            if (!_isActionName(name))
+                return _failure(`Unknown action "${name}".`);
+            try {
+                return await this._handlers[name](payload);
+            } catch (e) {
+                return _failure(`Action "${name}" threw: ${e.message || e}`);
+            }
+        }
+
+        _colExists(df) { return this._grid.columnOption(df) !== undefined; }
+
+        _validateCol(df) {
+            return this._colExists(df) ? null : _failure(`Column "${df}" not found.`);
+        }
+
+        async _refresh() {
+            try { await Promise.resolve(this._grid.refresh()); return null; }
+            catch (e) { return _failure(`Refresh failed: ${e.message || e}`); }
+        }
+
+        async _sorting(p) {
+            let err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            const order = p.sortOrder === 'none' ? undefined : p.sortOrder;
+            this._grid.columnOption(p.dataField, 'sortOrder', order);
+
+            err = await this._refresh();
+            if (err) return err;
+
+            const actual = this._grid.columnOption(p.dataField, 'sortOrder');
+            if (order === undefined && actual !== undefined)
+                return _failure(`Could not clear sorting on "${p.dataField}".`);
+            if (order !== undefined && actual !== order)
+                return _failure(`Could not set "${p.dataField}" sort to "${order}".`);
+
+            return _success();
+        }
+
+        async _clearSorting() {
+            this._grid.clearSorting();
+            const err = await this._refresh();
+            if (err) return err;
+
+            const still = this._grid.getVisibleColumns().filter(c => c.sortOrder !== undefined);
+            if (still.length)
+                return _failure('Some columns still have sorting applied.');
+
+            return _success();
+        }
+
+        async _filtering(p) {
+            let err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            this._grid.columnOption(p.dataField, 'filterValue', p.filterValue);
+            err = await this._refresh();
+            if (err) return err;
+
+            const actual = this._grid.columnOption(p.dataField, 'filterValue');
+            if (p.filterValue === null && actual != null)
+                return _failure(`Could not clear filter on "${p.dataField}".`);
+            if (p.filterValue !== null && actual !== p.filterValue)
+                return _failure(`Could not set filter on "${p.dataField}".`);
+
+            return _success();
+        }
+
+        async _filterValue(p) {
+            this._grid.option('filterValue', p.expression);
+            const err = await this._refresh();
+            if (err) return err;
+
+            const actual = this._grid.option('filterValue');
+            if (p.expression === null && actual != null)
+                return _failure('Could not clear the combined filter.');
+            if (p.expression !== null && actual == null)
+                return _failure('Combined filter was not applied.');
+
+            return _success();
+        }
+
+        async _clearFilter() {
+            this._grid.clearFilter();
+            const err = await this._refresh();
+            if (err) return err;
+
+            if (this._grid.getCombinedFilter() !== undefined)
+                return _failure('Some filters are still active.');
+
+            return _success();
+        }
+
+        async _searching(p) {
+            this._grid.searchByText(p.text);
+            const err = await this._refresh();
+            if (err) return err;
+
+            if (this._grid.option('searchPanel.text') !== p.text)
+                return _failure('Search text was not applied.');
+
+            return _success();
+        }
+
+        async _grouping(p) {
+            let err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            this._grid.columnOption(p.dataField, 'groupIndex', p.groupIndex);
+            err = await this._refresh();
+            if (err) return err;
+
+            const actual = this._grid.columnOption(p.dataField, 'groupIndex');
+            if (p.groupIndex === undefined && actual !== undefined && actual !== -1)
+                return _failure(`Could not remove grouping on "${p.dataField}".`);
+            if (p.groupIndex !== undefined && actual !== p.groupIndex)
+                return _failure(`Could not set grouping on "${p.dataField}".`);
+
+            return _success();
+        }
+
+        async _page(p) {
+            const page = p.page;
+            if (!Number.isInteger(page) || page < 1)
+                return _failure('Page must be a positive integer.');
+
+            const count = this._grid.pageCount();
+            if (count > 0 && page > count)
+                return _failure(`Page ${page} is out of range (${count} pages total).`);
+
+            const idx = page - 1;
+            await Promise.resolve(this._grid.pageIndex(idx));
+            if (this._grid.pageIndex() !== idx)
+                return _failure('Page navigation failed.');
+
+            return _success();
+        }
+
+        async _pageSize(p) {
+            const size = p.pageSize;
+            if (!Number.isInteger(size) || size <= 0)
+                return _failure('Page size must be a positive integer.');
+
+            this._grid.pageSize(size);
+            if (this._grid.pageSize() !== size)
+                return _failure('Could not change page size.');
+
+            return _success();
+        }
+
+        async _rowFocusing(p) {
+            if (!this._grid.option('focusedRowEnabled'))
+                return _failure('Focused row feature is not enabled.');
+
+            this._grid.option('focusedRowKey', p.key);
+            await Promise.resolve(this._grid.navigateToRow(p.key));
+
+            if (this._grid.option('focusedRowKey') !== p.key)
+                return _failure('Could not focus the requested row.');
+
+            return _success();
+        }
+
+        async _selectByKeys(p) {
+            await Promise.resolve(this._grid.selectRows(p.keys, p.preserve));
+            const selected = this._grid.getSelectedRowKeys();
+
+            if (!p.keys.every(k => selected.indexOf(k) !== -1))
+                return _failure('Not all requested rows were selected.');
+
+            return _success();
+        }
+
+        async _selectByIndexes(p) {
+            if (p.indexes.some(i => !Number.isInteger(i) || i < 0))
+                return _failure('Indexes must be non-negative integers.');
+
+            await Promise.resolve(this._grid.selectRowsByIndexes(p.indexes));
+            if (this._grid.getSelectedRowKeys().length === 0 && p.indexes.length > 0)
+                return _failure('Selection by indexes produced no results.');
+
+            return _success();
+        }
+
+        async _selectAll() {
+            await Promise.resolve(this._grid.selectAll());
+            if (this._grid.totalCount() > 0 && this._grid.getSelectedRowKeys().length === 0)
+                return _failure('Select all produced no results.');
+
+            return _success();
+        }
+
+        async _deselectAll() {
+            await Promise.resolve(this._grid.deselectAll());
+            if (this._grid.getSelectedRowKeys().length !== 0)
+                return _failure('Some rows are still selected.');
+
+            return _success();
+        }
+
+        async _clearSelection() {
+            this._grid.clearSelection();
+            if (this._grid.getSelectedRowKeys().length !== 0)
+                return _failure('Selection was not fully cleared.');
+
+            return _success();
+        }
+
+        async _columnsVisibility(p) {
+            const err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            this._grid.columnOption(p.dataField, 'visible', p.visible);
+            if (this._grid.columnOption(p.dataField, 'visible') !== p.visible)
+                return _failure(`Could not ${p.visible ? 'show' : 'hide'} column "${p.dataField}".`);
+
+            return _success();
+        }
+
+        async _columnsReorder(p) {
+            const err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            if (!Number.isInteger(p.visibleIndex) || p.visibleIndex < 0)
+                return _failure('Visible index must be a non-negative integer.');
+
+            this._grid.columnOption(p.dataField, 'visibleIndex', p.visibleIndex);
+            if (this._grid.columnOption(p.dataField, 'visibleIndex') !== p.visibleIndex)
+                return _failure(`Could not move column "${p.dataField}".`);
+
+            return _success();
+        }
+
+        async _columnsPinning(p) {
+            const err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            this._grid.columnOption(p.dataField, {
+                fixed: p.fixed,
+                fixedPosition: p.fixed ? (p.fixedPosition || 'left') : undefined,
+            });
+
+            if (this._grid.columnOption(p.dataField, 'fixed') !== p.fixed)
+                return _failure(`Could not ${p.fixed ? 'pin' : 'unpin'} column "${p.dataField}".`);
+
+            if (p.fixed) {
+                const expected = p.fixedPosition || 'left';
+                if (this._grid.columnOption(p.dataField, 'fixedPosition') !== expected)
+                    return _failure(`Column "${p.dataField}" pinned but not at the expected position.`);
+            }
+
+            return _success();
+        }
+
+        async _columnsResize(p) {
+            const err = this._validateCol(p.dataField);
+            if (err) return err;
+
+            if (typeof p.width === 'number' && p.width <= 0)
+                return _failure('Width must be a positive value.');
+
+            this._grid.columnOption(p.dataField, 'width', p.width);
+            if (this._grid.columnOption(p.dataField, 'width') !== p.width)
+                return _failure(`Could not resize column "${p.dataField}".`);
+
+            return _success();
+        }
+
+        async _summary(p) {
+            if (p.totalItems === undefined && p.groupItems === undefined)
+                return _failure('Provide at least "totalItems" or "groupItems".');
+
+            const current = this._grid.option('summary') || {};
+            const next = Object.assign({}, current);
+            if (p.totalItems !== undefined) next.totalItems = p.totalItems;
+            if (p.groupItems !== undefined) next.groupItems = p.groupItems;
+
+            this._grid.option('summary', next);
+            const err = await this._refresh();
+            if (err) return err;
+
+            const applied = this._grid.option('summary') || {};
+            if (p.totalItems && (applied.totalItems || []).length !== p.totalItems.length)
+                return _failure('Total summary items count mismatch.');
+            if (p.groupItems && (applied.groupItems || []).length !== p.groupItems.length)
+                return _failure('Group summary items count mismatch.');
+
+            return _success();
+        }
+
+        async _clearSummary() {
+            this._grid.option('summary', { totalItems: [], groupItems: [] });
+            const err = await this._refresh();
+            if (err) return err;
+
+            const applied = this._grid.option('summary') || {};
+            if ((applied.totalItems || []).length || (applied.groupItems || []).length)
+                return _failure('Summary was not fully cleared.');
+
+            return _success();
+        }
+
+        async _help() {
+            return { status: 'success', help: this.getHelp() };
+        }
+    }
+
+    // ─── Structured JSON: system prompt + response schema ──────────────
+    //
+    // Instead of describing payload shapes in the system prompt (simple
+    // prompting) or declaring tools (tool-calling), we use OpenAI's
+    // Structured Outputs feature: `response_format.type = "json_schema"`.
+    //
+    // The model is constrained to produce JSON that matches the schema,
+    // which eliminates parsing ambiguity and hallucinated field names.
+    // ───────────────────────────────────────────────────────────────────
+
+    const SYSTEM_PROMPT = `You help users control a DevExtreme DataGrid.
+Respond strictly according to the JSON schema provided via response_format.
+
+Each action object must contain "action" (one of the allowed enum values) and
+"payload" — a JSON-encoded string holding the parameters for that action.
+
+Payload shapes per action:
+- sorting:          {"dataField":"<col>","sortOrder":"asc"|"desc"|"none"}
+- clearSorting:     {}
+- filtering:        {"dataField":"<col>","filterValue":<string|number|null>}
+- filterValue:      {"expression":<FilterExpr|null>}
+  FilterExpr: ["field","op",value]  ops: =, <>, <, <=, >, >=, contains, notcontains, startswith, endswith
+  Combine: [expr,"and"|"or",expr]  Negate: ["!",expr]
+- clearFilter:      {}
+- searching:        {"text":"<query>"}
+- grouping:         {"dataField":"<col>","groupIndex":<number|null>}
+- page:             {"page":<1-based int>}
+- pageSize:         {"pageSize":<int>}
+- rowFocusing:      {"key":<ID number>}
+- selectByKeys:     {"keys":[<ID>,...],"preserve":<bool>}
+- selectByIndexes:  {"indexes":[<int>,...]}
+- selectAll:        {}
+- deselectAll:      {}
+- clearSelection:   {}
+- columnsVisibility:{"dataField":"<col>","visible":<bool>}
+- columnsReorder:   {"dataField":"<col>","visibleIndex":<int>}
+- columnsPinning:   {"dataField":"<col>","fixed":<bool>,"fixedPosition":"left"|"right"}
+- columnsResize:    {"dataField":"<col>","width":<number|string>}
+- summary:          {"totalItems":[{"column":"<col>","summaryType":"sum"|"min"|"max"|"avg"|"count"}],"groupItems":[...]}
+- clearSummary:     {}
+- help:             {}
+
+Grid key: "ID" (1-12). Columns: ID (hidden), CompanyName, Address (hidden), City, State, Zipcode (hidden), Phone, Fax (hidden), Website.
+12 company rows.
+
+Rules:
+- null for groupIndex removes grouping.
+- selectByKeys keys are ID numbers 1-12.
+- Actions run sequentially.
+- To reset: clearSorting + clearFilter + clearSelection + clearSummary + restore default column visibility.
+- If user asks what you can do, use the help action.`;
+
+    /**
+     * Build the JSON Schema passed to response_format.
+     *
+     * We use strict: true so the model output is guaranteed to conform.
+     * Because each action carries a different payload shape, we encode
+     * the payload as a JSON *string* (the client parses it). This keeps
+     * the top-level schema simple and strict-compatible while still
+     * allowing heterogeneous payloads.
+     */
+    const RESPONSE_SCHEMA = {
+        name: 'grid_actions_response',
+        strict: true,
+        schema: {
+            type: 'object',
+            properties: {
+                actions: {
+                    type: 'array',
+                    description: 'Ordered list of grid actions to execute.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            action: {
+                                type: 'string',
+                                description: 'Action name.',
+                                enum: [
+                                    'sorting', 'clearSorting', 'filtering', 'filterValue',
+                                    'clearFilter', 'searching', 'grouping', 'page', 'pageSize',
+                                    'rowFocusing', 'selectByKeys', 'selectByIndexes', 'selectAll',
+                                    'deselectAll', 'clearSelection', 'columnsVisibility',
+                                    'columnsReorder', 'columnsPinning', 'columnsResize',
+                                    'summary', 'clearSummary', 'help',
+                                ],
+                            },
+                            payload: {
+                                type: 'string',
+                                description: 'JSON-encoded payload object for the action. Use "{}" when no parameters are needed.',
+                            },
+                        },
+                        required: ['action', 'payload'],
+                        additionalProperties: false,
+                    },
+                },
+                explanation: {
+                    type: 'string',
+                    description: 'Brief user-facing explanation of what was done and why.',
+                },
+            },
+            required: ['actions', 'explanation'],
+            additionalProperties: false,
+        },
+    };
+
+    // ─── Azure OpenAI configuration ────────────────────────────────────
+
+    const AzureOpenAIConfig = {
+        deployment: 'gpt-4o-mini',
+        apiVersion: '2024-10-21',
+        endpoint: 'https://public-api.devexpress.com/demo-openai',
+        apiKey: 'DEMO',
+    };
+
+    let chatService;
+
+    function ensureChatService() {
+        if (chatService) return;
+        if (!window.AzureOpenAI) throw new Error('AzureOpenAI SDK not loaded yet.');
+
+        chatService = new window.AzureOpenAI({
+            dangerouslyAllowBrowser: true,
+            deployment: AzureOpenAIConfig.deployment,
+            endpoint: AzureOpenAIConfig.endpoint,
+            apiVersion: AzureOpenAIConfig.apiVersion,
+            apiKey: AzureOpenAIConfig.apiKey,
+        });
+    }
+
+    // ─── AI interaction via Structured JSON (json_schema) ──────────────
+
+    async function getAIResponse(userMessage) {
+        ensureChatService();
+
+        const response = await chatService.chat.completions.create({
+            messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: userMessage },
+            ],
+            model: AzureOpenAIConfig.deployment,
+            max_tokens: 1000,
+            temperature: 0.2,
+            response_format: {
+                type: 'json_schema',
+                json_schema: RESPONSE_SCHEMA,
+            },
+        });
+
+        const content = response.choices?.[0]?.message?.content;
+        if (!content) throw new Error('Empty response from AI.');
+
+        const parsed = JSON.parse(content);
+
+        // The schema guarantees { actions: [...], explanation: string }.
+        // Each action.payload is a JSON string that we need to parse.
+        const actions = (parsed.actions || []).map(a => ({
+            action: a.action,
+            payload: JSON.parse(a.payload || '{}'),
+        }));
+
+        return {
+            actions,
+            explanation: parsed.explanation || '',
+        };
+    }
+
+    async function executeActions(api, actions) {
+        const results = [];
+
+        for (const a of actions) {
+            const name = a.action;
+            const payload = a.payload || {};
+
+            if (name === 'grouping' && payload.groupIndex === null)
+                payload.groupIndex = undefined;
+
+            const result = await api.action(name, payload);
+            results.push({ action: name, payload, result });
+        }
+
+        return results;
+    }
+
+    // ─── Sample data & grid config ─────────────────────────────────────
+
+    var sampleData = [
+        { ID: 1,  CompanyName: "Premier Buy",      Address: "7601 Penn Avenue South",   City: "Richfield",      State: "Minnesota",      Zipcode: 55423, Phone: "(612) 291-1000", Fax: "(612) 291-2001", Website: "http://www.nowebsitepremierbuy.dx" },
+        { ID: 2,  CompanyName: "ElectrixMax",       Address: "263 Shuman Blvd",          City: "Naperville",     State: "Illinois",       Zipcode: 60563, Phone: "(630) 438-7800", Fax: "(630) 438-7801", Website: "http://www.nowebsiteelectrixmax.dx" },
+        { ID: 3,  CompanyName: "Video Emporium",    Address: "1201 Elm Street",          City: "Dallas",         State: "Texas",          Zipcode: 75270, Phone: "(214) 854-3000", Fax: "(214) 854-3001", Website: "http://www.nowebsitevideoemporium.dx" },
+        { ID: 4,  CompanyName: "Screen Shop",       Address: "1000 Lowes Blvd",          City: "Mooresville",    State: "North Carolina", Zipcode: 28117, Phone: "(800) 445-6937", Fax: "(800) 445-6938", Website: "http://www.nowebsitescreenshop.dx" },
+        { ID: 5,  CompanyName: "Braeburn",          Address: "1 Infinite Loop",          City: "Cupertino",      State: "California",     Zipcode: 95014, Phone: "(408) 996-1010", Fax: "(408) 996-1012", Website: "http://www.nowebsitebraeburn.dx" },
+        { ID: 6,  CompanyName: "PriceCo",           Address: "30 Hunter Lane",           City: "Camp Hill",      State: "Pennsylvania",   Zipcode: 17011, Phone: "(717) 761-2633", Fax: "(717) 761-2334", Website: "http://www.nowebsitepriceco.dx" },
+        { ID: 7,  CompanyName: "Ultimate Gadget",   Address: "1557 Watson Blvd",         City: "Warner Robbins", State: "Georgia",        Zipcode: 31093, Phone: "(995) 623-6785", Fax: "(995) 623-6786", Website: "http://www.nowebsiteultimategadget.dx" },
+        { ID: 8,  CompanyName: "EZ Stop",           Address: "618 Michillinda Ave.",      City: "Arcadia",        State: "California",     Zipcode: 91007, Phone: "(626) 265-8632", Fax: "(626) 265-8633", Website: "http://www.nowebsiteezstop.dx" },
+        { ID: 9,  CompanyName: "Clicker",           Address: "1100 W. Artesia Blvd.",    City: "Compton",        State: "California",     Zipcode: 90220, Phone: "(310) 884-9000", Fax: "(310) 884-9001", Website: "http://www.nowebsiteclicker.dx" },
+        { ID: 10, CompanyName: "Store of America",  Address: "2401 Utah Ave. South",     City: "Seattle",        State: "Washington",     Zipcode: 98134, Phone: "(206) 447-1575", Fax: "(206) 447-1576", Website: "http://www.nowebsiteamerica.dx" },
+        { ID: 11, CompanyName: "Zone Toys",         Address: "1945 S Cienega Boulevard", City: "Los Angeles",    State: "California",     Zipcode: 90034, Phone: "(310) 237-5642", Fax: "(310) 237-5643", Website: "http://www.nowebsitezonetoys.dx" },
+        { ID: 12, CompanyName: "ACME",              Address: "2525 E El Segundo Blvd",   City: "El Segundo",     State: "California",     Zipcode: 90245, Phone: "(310) 536-0611", Fax: "(310) 536-0612", Website: "http://www.nowebsiteacme.dx" },
+    ];
+
+    var gridConfig = {
+        keyExpr: 'ID',
+        showBorders: true,
+        allowColumnReordering: true,
+        allowColumnResizing: true,
+        focusedRowEnabled: true,
+        columnFixing: { enabled: true },
+        columnChooser: { enabled: true },
+        selection: { mode: 'multiple' },
+        searchPanel: { visible: true, width: 240, placeholder: 'Search...' },
+        filterRow: { visible: true },
+        headerFilter: { visible: true },
+        groupPanel: { visible: true },
+        paging: { pageSize: 5 },
+        pager: {
+            visible: true,
+            showPageSizeSelector: true,
+            allowedPageSizes: [5, 10],
+            showNavigationButtons: true,
+            showInfo: true,
+        },
+        toolbar: {
+            items: [
+                'groupPanel',
+                {
+                    location: 'after',
+                    widget: 'dxButton',
+                    cssClass: 'assistant_btn',
+                    options: {
+                        icon: 'sparkle',
+                        onClick() { $('#aiAssistant').dxPopup('instance').show(); },
+                    },
+                },
+                'searchPanel',
+            ],
+        },
+        columns: [
+            { dataField: 'ID', width: 60, visible: false },
+            { dataField: 'CompanyName' },
+            { dataField: 'Address', visible: false },
+            { dataField: 'City' },
+            { dataField: 'State' },
+            { dataField: 'Zipcode', visible: false },
+            { dataField: 'Phone' },
+            { dataField: 'Fax', visible: false },
+            { dataField: 'Website' },
+        ],
+    };
+
+    // ─── Bootstrap ─────────────────────────────────────────────────────
+
+    $(() => {
+        const REMOTE_LATENCY_MS = 500;
+
+        const remoteBackingStore = new DevExpress.data.ArrayStore({
+            key: 'ID',
+            data: sampleData.map(r => $.extend({}, r)),
+        });
+
+        const remoteDataSource = {
+            store: new DevExpress.data.CustomStore({
+                key: 'ID',
+                load(loadOptions) {
+                    const d = $.Deferred();
+                    setTimeout(() => {
+                        remoteBackingStore.load(loadOptions).done(data => {
+                            remoteBackingStore.totalCount(loadOptions).done(count => {
+                                d.resolve(data, { totalCount: count });
+                            });
+                        }).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+                byKey(key) {
+                    return remoteBackingStore.byKey(key);
+                },
+                totalCount(loadOptions) {
+                    const d = $.Deferred();
+                    setTimeout(() => {
+                        remoteBackingStore.totalCount(loadOptions).done(d.resolve).fail(d.reject);
+                    }, REMOTE_LATENCY_MS);
+                    return d.promise();
+                },
+            }),
+        };
+
+        let isRemote = false;
+        let api = null;
+
+        function createGrid() {
+            const $container = $('#gridContainer');
+            const prev = $container.data('dxDataGrid');
+            if (prev) prev.dispose();
+            $container.empty();
+
+            const opts = $.extend(true, {}, gridConfig);
+            opts.dataSource = isRemote ? remoteDataSource : sampleData;
+            if (isRemote) {
+                opts.remoteOperations = { filtering: true, sorting: true, paging: true, grouping: true };
+            }
+
+            const grid = $container.dxDataGrid(opts).dxDataGrid('instance');
+            api = new DataGridToolingApi(grid);
+        }
+
+        createGrid();
+
+        const $badge = $('#dataModeBadge');
+
+        function updateBadge() {
+            if (isRemote) {
+                $badge.attr('class', 'remote').text('🌐 Remote data (' + REMOTE_LATENCY_MS + 'ms latency)');
+            } else {
+                $badge.attr('class', 'local').text('📦 Local data');
+            }
+        }
+
+        $('#dataModeSwitch').dxSwitch({
+            value: false,
+            switchedOnText: 'Remote',
+            switchedOffText: 'Local',
+            onValueChanged(e) {
+                isRemote = e.value;
+                updateBadge();
+                createGrid();
+            },
+        });
+
+        function updateIcon($container, iconName) {
+            $container.find('.my-icon')
+                .removeClass()
+                .addClass('my-icon dx-icon dx-icon-' + iconName);
+        }
+
+        function buildActionResultsHtml(results) {
+            const lines = results.map(r => {
+                const ok = r.result.status === 'success';
+                const icon = ok ? '✓' : '✗';
+                const cls = ok ? 'ok' : 'fail';
+                const errorHtml = ok ? '' : `<span class="action-error"> — ${r.result.error}</span>`;
+                return `<div class="action-result-item ${cls}">`
+                    + `<span>${icon}</span>`
+                    + `<span class="action-name">${r.action}</span>`
+                    + errorHtml
+                    + `</div>`;
+            });
+            return `<div class="action-results">${lines.join('')}</div>`;
+        }
+
+        function buildHelpHtml(helpItems) {
+            const lines = helpItems.map(h =>
+                `<div class="action-result-item ok">`
+                + `<span class="action-name">${h.name}</span>`
+                + `<span> — ${h.description}</span>`
+                + `</div>`
+            );
+            return `<div class="action-results">${lines.join('')}</div>`;
+        }
+
+        async function renderMessageContent(message, element) {
+            const $container = $('<div/>')
+                .addClass('message-container dx-pending')
+                .appendTo(element);
+
+            $('<i/>').addClass('my-icon dx-icon dx-icon-sparkle').appendTo($container);
+
+            const $content = $('<div/>').addClass('message-content').appendTo($container);
+
+            $('<b>')
+                .addClass('dx-chat-messagebubble-header')
+                .text(message.text)
+                .appendTo($content);
+
+            const $operation = $('<div>')
+                .addClass('dx-chat-messagebubble-operation')
+                .text('Processing…')
+                .appendTo($content);
+
+            const progressBar = $('<div>').dxProgressBar({
+                value: false,
+                visible: true,
+                showStatus: false,
+                width: '100%',
+            }).appendTo(element).dxProgressBar('instance');
+
+            try {
+                const aiResponse = await getAIResponse(message.text);
+                const results = await executeActions(api, aiResponse.actions);
+
+                progressBar.option('visible', false);
+
+                const hasHelp = results.some(r => r.action === 'help' && r.result.help);
+                const allOk = results.every(r => r.result.status === 'success');
+
+                if (hasHelp) {
+                    const helpResult = results.find(r => r.result.help);
+                    $container.removeClass('dx-pending').addClass('dx-success');
+                    updateIcon($container, 'help');
+                    $operation.text(aiResponse.explanation || 'Here are the available actions:');
+                    $content.append(buildHelpHtml(helpResult.result.help));
+                } else if (results.length === 0) {
+                    $container.removeClass('dx-pending').addClass('dx-success');
+                    updateIcon($container, 'info');
+                    $operation.text(aiResponse.explanation || 'No actions needed.');
+                } else if (allOk) {
+                    $container.removeClass('dx-pending').addClass('dx-success');
+                    updateIcon($container, 'checkmarkcircle');
+                    $operation.text(aiResponse.explanation || 'Done');
+                    $content.append(buildActionResultsHtml(results));
+                } else {
+                    const failCount = results.filter(r => r.result.status !== 'success').length;
+                    $container.removeClass('dx-pending').addClass('dx-error');
+                    updateIcon($container, 'info');
+                    $operation.text(`${failCount} of ${results.length} action(s) failed`);
+                    $content.append(buildActionResultsHtml(results));
+                }
+            } catch (err) {
+                progressBar.option('visible', false);
+                $container.removeClass('dx-pending').addClass('dx-error');
+                updateIcon($container, 'info');
+                $operation.text(err.message || String(err));
+            }
+        }
+
+        $('#aiAssistant').dxPopup({
+            title: 'AI Assistant (Structured JSON)',
+            width: 600,
+            height: '80%',
+            visible: false,
+            showCloseButton: true,
+            toolbarItems: [{
+                toolbar: 'top',
+                location: 'after',
+                widget: 'dxButton',
+                options: {
+                    icon: 'chatadd',
+                    stylingMode: 'text',
+                    onClick() {
+                        $('#chatContainer').dxChat('instance').option('dataSource', []);
+                    },
+                },
+            }],
+            contentTemplate() {
+                return $('<div>').attr('id', 'chatContainer').dxChat({
+                    user: { id: 'user1', name: 'User' },
+                    dataSource: [],
+                    height: '100%',
+                    showAvatar: false,
+                    showDayHeaders: false,
+                    showMessageTimestamp: false,
+                    onMessageEntered(e) {
+                        const chat = e.component;
+
+                        chat.option('dataSource', [
+                            ...chat.option('dataSource'),
+                            {
+                                id: Date.now(),
+                                timestamp: new Date(),
+                                author: { id: 'assistant', name: 'AI Assistant' },
+                                text: e.message.text,
+                            },
+                        ]);
+                    },
+                    messageTemplate(data, element) {
+                        if (data.message.author?.id === 'assistant') {
+                            renderMessageContent(data.message, element);
+                        } else {
+                            element.text(data.message.text);
+                        }
+                    },
+                });
+            },
+        });
+    });
+    </script>
+</body>
+</html>
+
